@@ -88,3 +88,36 @@ runtime-quality-examples/
 ```
 
 `quality` prompts не перемещаются и переиспользуются для каждой задачи. Task prompt из `prompts` переносится в completed archive только после успешного завершения task step и всех quality steps.
+
+## Текущий каркас решения
+
+Solution `OpenCodeQueue.sln` содержит четыре проекта:
+
+- `src/OpenCodeQueue.Core` — доменная модель, статусы и интерфейсы портов для registry проектов, discovery, OpenCode, prompt repository, state store, lock, archiver и console reporter.
+- `src/OpenCodeQueue.Infrastructure` — минимальные адаптеры файловой системы: JSON config/registry, поиск numbered Markdown prompts, state JSON/JSONL, lock-файл, archiver и заглушка OpenCode client.
+- `src/OpenCodeQueue.Cli` — composition root, простой parser команд, русскоязычный console reporter и стартовое меню.
+- `tests/OpenCodeQueue.Tests` — unit tests без реального OpenCode.
+
+## Runtime-директории
+
+- `prompts` — папка основных task prompt-файлов. В очередь попадают `.md` файлы с числовым префиксом: `01.md`, `01-auth.md`, `0.1.md`, `0.0.2-refactor.md`.
+- `quality` или `reviews` — папка проверочных prompt-файлов. Эти файлы не перемещаются и будут переиспользоваться для каждой task.
+- `.queue` — project-scoped состояние runner: будущие `state.json`, `events.jsonl`, lock-файл, run manifests и архив `completed`.
+- `opencode-queue.json` — глобальный registry проектов `OpenCodeQueue`; он хранит `activeProjectId` и профили проектов с `projectDir`, `promptsDir`, `qualityDir`, `stateDir`.
+
+## Стартовое меню
+
+Запуск без аргументов входит в интерактивное меню на русском языке. Меню показывает текущий активный проект и пункты: запуск очереди, запуск одной задачи, восстановление run, статус, список задач, выбор проекта, добавление проекта, диагностика и выход. На этом шаге workflow-команды являются безопасными заглушками.
+
+## Минимальные команды
+
+```text
+opencode-queue --help
+opencode-queue menu --config opencode-queue.json
+opencode-queue run --config opencode-queue.json [--project <id>] [--once]
+opencode-queue validate --config opencode-queue.json
+opencode-queue project list --config opencode-queue.json
+opencode-queue project current --config opencode-queue.json
+opencode-queue project select <id> --config opencode-queue.json
+opencode-queue project add --config opencode-queue.json
+```
