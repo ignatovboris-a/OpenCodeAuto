@@ -8,6 +8,8 @@ using OpenCodeQueue.Infrastructure;
 var services = new ServiceCollection()
     .AddOpenCodeQueueInfrastructure()
     .AddSingleton<IConsoleReporter, RussianConsoleReporter>()
+    .AddSingleton<ProjectProfilePrompt>()
+    .AddSingleton<ProjectConsolePresenter>()
     .AddSingleton<CommandDispatcher>()
     .AddSingleton<InteractiveMenu>()
     .AddSingleton<QueueCliApplication>()

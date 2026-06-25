@@ -138,6 +138,8 @@ Runner должен сохранять состояние до каждого н
 
 CLI adapter можно оставить как fallback, но он обязан использовать конкретный session id, если workflow уже начат.
 
+Managed server adapter запускает `opencode serve` как дочерний процесс runner и завершает его при dispose приложения. Если runner падает во время active run, OpenCode process может быть завершён вместе с runner; восстановление опирается не на живой process, а на сохранённый `sessionId` и повторный запуск/подключение к server в том же `projectDir`.
+
 ## 9. ProjectDir и OpenCode
 
 OpenCode должен работать в выбранном `projectDir`:

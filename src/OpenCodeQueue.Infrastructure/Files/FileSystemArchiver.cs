@@ -6,7 +6,7 @@ namespace OpenCodeQueue.Infrastructure.Files;
 
 public sealed class FileSystemArchiver : IFileArchiver
 {
-    public Task ArchiveCompletedTaskAsync(ProjectProfile project, PromptFile taskPrompt, CancellationToken cancellationToken)
+    public Task ArchiveCompletedTaskAsync(ProjectProfile project, PromptDescriptor taskPrompt, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var completedDir = ProjectPaths.CompletedDir(project);

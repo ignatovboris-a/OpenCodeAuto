@@ -105,6 +105,14 @@ Solution `OpenCodeQueue.sln` содержит четыре проекта:
 - `.queue` — project-scoped состояние runner: будущие `state.json`, `events.jsonl`, lock-файл, run manifests и архив `completed`.
 - `opencode-queue.json` — глобальный registry проектов `OpenCodeQueue`; он хранит `activeProjectId` и профили проектов с `projectDir`, `promptsDir`, `qualityDir`, `stateDir`.
 
+## Ограничения CLI fallback
+
+CLI fallback всегда запускает `opencode` с рабочей директорией `projectDir` и аргументом `--dir <projectDir>`. Для продолжения используется только конкретный `--session <sessionId>`; `--continue` не применяется как recovery-механизм, потому что может продолжить не ту session.
+
+Если после crash в manifest нет `sessionId`, автоматическое восстановление через CLI запрещено: run должен перейти в failed/manual intervention. Если `sessionId` есть, adapter может выполнить только conservative recovery в этой session, потому что CLI не предоставляет такой же доказуемый status/messages API, как OpenCode Server API.
+
+Для больших prompt-файлов CLI adapter использует attachment mode: `--file <prompt.md>` и короткую русскую wrapper-инструкцию. Полный текст prompt не пишется в command log; stdout/stderr процесса сохраняются в `.queue/runs/<runId>/logs/<stepId>.stdout.log` и `.queue/runs/<runId>/logs/<stepId>.stderr.log`, когда orchestration передаёт `runId` и `stepId`.
+
 ## Стартовое меню
 
 Запуск без аргументов входит в интерактивное меню на русском языке. Меню показывает текущий активный проект и пункты: запуск очереди, запуск одной задачи, восстановление run, статус, список задач, выбор проекта, добавление проекта, диагностика и выход. На этом шаге workflow-команды являются безопасными заглушками.

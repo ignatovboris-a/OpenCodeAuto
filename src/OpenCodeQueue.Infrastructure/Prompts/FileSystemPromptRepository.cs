@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+using System.Security.Cryptography;
 using OpenCodeQueue.Core.Configuration;
 using OpenCodeQueue.Core.Ports;
 using OpenCodeQueue.Core.Prompts;
@@ -7,42 +7,120 @@ namespace OpenCodeQueue.Infrastructure.Prompts;
 
 public sealed partial class FileSystemPromptRepository : IPromptRepository
 {
-    public Task<IReadOnlyList<PromptFile>> GetTaskPromptsAsync(ProjectProfile project, CancellationToken cancellationToken)
+    public async Task<PromptDiscoveryResult> DiscoverAsync(ProjectProfile project, CancellationToken cancellationToken)
     {
-        return GetPromptsAsync(project, project.PromptsDir, PromptKind.Task, cancellationToken);
+        var warnings = new List<string>();
+        var tasks = await GetPromptsAsync(project, PromptKind.Task, warnings, cancellationToken);
+        var quality = await GetPromptsAsync(project, PromptKind.Quality, warnings, cancellationToken);
+        return new PromptDiscoveryResult(tasks, quality, warnings);
     }
 
-    public Task<IReadOnlyList<PromptFile>> GetQualityPromptsAsync(ProjectProfile project, CancellationToken cancellationToken)
-    {
-        return GetPromptsAsync(project, project.QualityDir, PromptKind.Quality, cancellationToken);
-    }
-
-    public Task<string> ReadPromptTextAsync(PromptFile prompt, CancellationToken cancellationToken)
+    public Task<string> ReadPromptTextAsync(PromptDescriptor prompt, CancellationToken cancellationToken)
     {
         return File.ReadAllTextAsync(prompt.Path, cancellationToken);
     }
 
-    private static Task<IReadOnlyList<PromptFile>> GetPromptsAsync(ProjectProfile project, string directory, PromptKind kind, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<PromptDescriptor>> GetPromptsAsync(ProjectProfile project, PromptKind kind, List<string> warnings, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var fullDirectory = Path.GetFullPath(Path.Combine(project.ProjectDir, directory));
-        if (!Directory.Exists(fullDirectory))
+        string fullDirectory;
+        try
         {
-            IReadOnlyList<PromptFile> empty = [];
-            return Task.FromResult(empty);
+            fullDirectory = kind == PromptKind.Task ? ProjectPaths.PromptsDir(project) : ProjectPaths.QualityDir(project);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException or UnauthorizedAccessException)
+        {
+            warnings.Add($"Некорректный путь папки {KindTitle(kind)}: {exception.Message}");
+            return [];
         }
 
-        var prompts = Directory.EnumerateFiles(fullDirectory, "*.md", SearchOption.TopDirectoryOnly)
-            .Select(path => new { Path = path, Match = NumberPrefixRegex().Match(Path.GetFileName(path)) })
-            .Where(item => item.Match.Success)
-            .Select(item => new PromptFile(item.Path, Path.GetFileName(item.Path), item.Match.Groups[1].Value, kind))
-            .OrderBy(prompt => prompt.NumberPrefix, NumberPrefixComparer.Instance)
-            .ThenBy(prompt => prompt.FileName, StringComparer.OrdinalIgnoreCase)
+        if (!Directory.Exists(fullDirectory))
+        {
+            return [];
+        }
+
+        if (IsIgnoredDirectory(fullDirectory))
+        {
+            return [];
+        }
+
+        string[] filePaths;
+        try
+        {
+            filePaths = Directory.EnumerateFiles(fullDirectory, "*.md", SearchOption.TopDirectoryOnly).ToArray();
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            warnings.Add($"Не удалось прочитать папку {KindTitle(kind)}: {fullDirectory}. {exception.Message}");
+            return [];
+        }
+
+        var files = new List<NumberedPromptFile>();
+        foreach (var path in filePaths)
+        {
+            var fileName = Path.GetFileName(path);
+            if (kind == PromptKind.Task && fileName.StartsWith('_'))
+            {
+                continue;
+            }
+
+            if (NumericPrefix.TryParseFileNamePrefix(fileName, out var prefix))
+            {
+                files.Add(new NumberedPromptFile(Path.GetFullPath(path), prefix!));
+                continue;
+            }
+
+            warnings.Add($"Файл без числового префикса пропущен ({KindTitle(kind)}): {fileName}");
+        }
+
+        // Equal numeric keys are ordered deterministically by file name and then full path.
+        var orderedFiles = files
+            .OrderBy(prompt => prompt.Prefix)
+            .ThenBy(prompt => Path.GetFileName(prompt.Path), StringComparer.OrdinalIgnoreCase)
+            .ThenBy(prompt => prompt.Path, StringComparer.Ordinal)
             .ToArray();
 
-        return Task.FromResult<IReadOnlyList<PromptFile>>(prompts);
+        var prompts = new List<PromptDescriptor>(orderedFiles.Length);
+        foreach (var file in orderedFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var info = new FileInfo(file.Path);
+                prompts.Add(new PromptDescriptor(
+                    file.Path,
+                    Path.GetFileName(file.Path),
+                    file.Prefix,
+                    await ComputeSha256Async(file.Path, cancellationToken),
+                    info.Length,
+                    info.LastWriteTimeUtc,
+                    kind));
+            }
+            catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+            {
+                warnings.Add($"Не удалось прочитать prompt-файл ({KindTitle(kind)}): {file.Path}. {exception.Message}");
+            }
+        }
+
+        return prompts;
     }
 
-    [GeneratedRegex("^([0-9]+(?:\\.[0-9]+)*)")]
-    private static partial Regex NumberPrefixRegex();
+    private static bool IsIgnoredDirectory(string directory)
+    {
+        var name = Path.GetFileName(Path.TrimEndingDirectorySeparator(directory));
+        return string.Equals(name, ".queue", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(name, "completed", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(name, "failed", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string KindTitle(PromptKind kind) => kind == PromptKind.Task ? "tasks" : "quality";
+
+    private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)
+    {
+        await using var stream = File.OpenRead(path);
+        var hash = await SHA256.HashDataAsync(stream, cancellationToken);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private sealed record NumberedPromptFile(string Path, NumericPrefix Prefix);
 }

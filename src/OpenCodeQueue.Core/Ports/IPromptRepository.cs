@@ -5,9 +5,7 @@ namespace OpenCodeQueue.Core.Ports;
 
 public interface IPromptRepository
 {
-    Task<IReadOnlyList<PromptFile>> GetTaskPromptsAsync(ProjectProfile project, CancellationToken cancellationToken);
+    Task<PromptDiscoveryResult> DiscoverAsync(ProjectProfile project, CancellationToken cancellationToken);
 
-    Task<IReadOnlyList<PromptFile>> GetQualityPromptsAsync(ProjectProfile project, CancellationToken cancellationToken);
-
-    Task<string> ReadPromptTextAsync(PromptFile prompt, CancellationToken cancellationToken);
+    Task<string> ReadPromptTextAsync(PromptDescriptor prompt, CancellationToken cancellationToken);
 }

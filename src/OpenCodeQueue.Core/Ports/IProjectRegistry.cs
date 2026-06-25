@@ -13,7 +13,7 @@ public interface IProjectRegistry
 
     Task<ProjectRegistryResult> AddOrUpdateAsync(string configPath, ProjectProfile project, CancellationToken cancellationToken);
 
-    Task<ProjectRegistryResult> RemoveAsync(string configPath, string projectId, CancellationToken cancellationToken);
+    Task<ProjectRegistryResult> RemoveAsync(string configPath, string projectId, bool confirmedActiveRemoval, CancellationToken cancellationToken);
 
     Task<ProjectRegistryResult> SelectAsync(string configPath, string projectId, CancellationToken cancellationToken);
 }

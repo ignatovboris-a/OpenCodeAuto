@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\OpenCodeQueue.Core\OpenCodeQueue.Core.csproj" />
     <ProjectReference Include="..\..\src\OpenCodeQueue.Infrastructure\OpenCodeQueue.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\OpenCodeQueue.Cli\OpenCodeQueue.Cli.csproj" />
   </ItemGroup>
 
 </Project>

@@ -16,7 +16,15 @@ public static class DependencyInjection
         services.AddSingleton<IAppConfigStore, JsonAppConfigStore>();
         services.AddSingleton<IProjectRegistry, JsonProjectRegistry>();
         services.AddSingleton<IProjectDiscoveryService, CompositeProjectDiscoveryService>();
-        services.AddSingleton<IOpenCodeClient, StubOpenCodeClient>();
+        services.AddSingleton<IOpenCodeServerProcessFactory, DefaultOpenCodeServerProcessFactory>();
+        services.AddSingleton<IProcessRunner, DefaultProcessRunner>();
+        services.AddSingleton<OpenCodeServerClient>(provider => new OpenCodeServerClient(
+            new HttpClient { Timeout = TimeSpan.FromMinutes(20) },
+            provider.GetRequiredService<IOpenCodeServerProcessFactory>()));
+        services.AddSingleton<OpenCodeCliClient>();
+        services.AddSingleton<IOpenCodeClient>(provider => new OpenCodeFallbackClient(
+            provider.GetRequiredService<OpenCodeServerClient>(),
+            provider.GetRequiredService<OpenCodeCliClient>()));
         services.AddSingleton<IPromptRepository, FileSystemPromptRepository>();
         services.AddSingleton<IStateStore, JsonStateStore>();
         services.AddSingleton<IRunLock, FileRunLock>();

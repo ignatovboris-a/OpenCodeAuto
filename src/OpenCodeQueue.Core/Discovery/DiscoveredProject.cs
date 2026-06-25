@@ -1,7 +1,17 @@
 namespace OpenCodeQueue.Core.Discovery;
 
+public enum DiscoveryConfidence
+{
+    Low,
+    Medium,
+    High
+}
+
 public sealed record DiscoveredProject(
     string Source,
-    string ProjectDir,
+    string DisplayName,
+    string? ProjectDir,
     string? SuggestedId,
-    string? DisplayName);
+    DiscoveryConfidence Confidence,
+    IReadOnlyList<string> Warnings,
+    bool CanSelectDirectly);
