@@ -300,6 +300,11 @@ public sealed class QueueUseCases(
             return await ArchiveCompletedRunAsync(project, manifest, cancellationToken);
         }
 
+        if (manifest.Status == RunStatus.Failed && IsMessageIdPayloadValidationFailure(manifest))
+        {
+            manifest = await ResetFailedMessageIdPayloadValidationStepAsync(project, manifest, cancellationToken);
+        }
+
         if (manifest.Status is RunStatus.Failed or RunStatus.Aborted or RunStatus.NeedsManualIntervention or RunStatus.Completed)
         {
             return manifest;
@@ -429,6 +434,53 @@ public sealed class QueueUseCases(
         {
             return await MarkStepFailedAsync(project, manifest, stepIndex, exception.Message, cancellationToken);
         }
+    }
+
+    private async Task<RunManifest> ResetFailedMessageIdPayloadValidationStepAsync(ProjectProfile project, RunManifest manifest, CancellationToken cancellationToken)
+    {
+        var index = manifest.CurrentStepIndex >= 0 && manifest.CurrentStepIndex < manifest.Steps.Count
+            ? manifest.CurrentStepIndex
+            : manifest.Steps.ToList().FindIndex(step => step.Status == WorkflowStepStatus.Failed);
+        if (index < 0)
+        {
+            return manifest;
+        }
+
+        var step = manifest.Steps[index];
+        var reset = step with
+        {
+            Status = WorkflowStepStatus.Pending,
+            SessionMessageId = null,
+            RecoveryMessageId = null,
+            LastInterruptionSignature = null,
+            SameSignatureRepeatCount = 0,
+            NextRetryAt = null,
+            LastProgressAt = clock.Now
+        };
+
+        var recovered = ReplaceStep(manifest, index, reset) with
+        {
+            Status = RunStatus.Running,
+            CurrentStepIndex = index,
+            CurrentLogicalStepStatus = reset.Status.ToString(),
+            LastError = null,
+            LastInterruptionSignature = null,
+            SameSignatureRepeatCount = 0,
+            UpdatedAt = clock.Now,
+            FinishedAt = null
+        };
+        await stateStore.SaveRunManifestAsync(project, recovered, cancellationToken);
+        await AppendEventAsync(project, QueueEventTypes.ActiveRunRecoveredAfterRestart, recovered.RunId, reset.Id.Value, recovered.SessionId, recovered.TaskDescriptor?.FileName, "Повторяю step после OpenCode payload validation error по messageID; предыдущий prompt не был принят server API.", cancellationToken);
+        return recovered;
+    }
+
+    private static bool IsMessageIdPayloadValidationFailure(RunManifest manifest)
+    {
+        var text = manifest.LastError ?? string.Empty;
+        return text.Contains("messageID", StringComparison.OrdinalIgnoreCase)
+            && text.Contains("Expected a string starting with", StringComparison.OrdinalIgnoreCase)
+            && text.Contains("msg", StringComparison.OrdinalIgnoreCase)
+            && text.Contains("BadRequest", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<RunManifest> SendLogicalStepWithRecoveryAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string sessionId, PromptPayload payload, bool isContinuation, CancellationToken cancellationToken)
@@ -705,7 +757,7 @@ public sealed class QueueUseCases(
         {
             Content = manifest.OpenCodeSettingsSnapshot.Resilience.ContinuationPrompt ?? OpenCodeContinuationPrompt.Default,
             SourcePath = step.SnapshotPath ?? step.SourcePath,
-            MessageId = $"{manifest.RunId}:{step.Id.Value}:continuation:{attempt}",
+            MessageId = BuildOpenCodeMessageId(manifest.RunId, step.Id.Value, "continuation", attempt.ToString()),
             Transport = PromptTransport.Inline,
             MaxInlinePromptChars = manifest.OpenCodeSettingsSnapshot.MaxInlinePromptChars,
             RunId = manifest.RunId,
@@ -721,12 +773,19 @@ public sealed class QueueUseCases(
         {
             Content = content,
             SourcePath = path,
-            MessageId = $"{manifest.RunId}:{step.Id.Value}:{step.AttemptCount}",
+            MessageId = BuildOpenCodeMessageId(manifest.RunId, step.Id.Value, step.AttemptCount.ToString()),
             Transport = manifest.OpenCodeSettingsSnapshot.PromptTransport,
             MaxInlinePromptChars = manifest.OpenCodeSettingsSnapshot.MaxInlinePromptChars,
             RunId = manifest.RunId,
             StepId = step.Id.Value
         };
+    }
+
+    private static string BuildOpenCodeMessageId(params string[] parts)
+    {
+        var raw = string.Join('_', parts.Where(part => !string.IsNullOrWhiteSpace(part)));
+        var chars = raw.Select(ch => char.IsLetterOrDigit(ch) ? ch : '_').ToArray();
+        return "msg_" + new string(chars).Trim('_');
     }
 
     private async Task<RunManifest> MarkStepCompletedAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string? messageId, CancellationToken cancellationToken)

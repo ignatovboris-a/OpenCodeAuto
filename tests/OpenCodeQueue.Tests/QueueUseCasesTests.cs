@@ -24,6 +24,8 @@ public sealed class QueueUseCasesTests
 
         Assert.True(result.IsSuccess);
         Assert.Equal(["task", "quality-01", "quality-02"], fixture.OpenCode.SentStepIds);
+        Assert.All(fixture.OpenCode.Payloads, payload => Assert.StartsWith("msg", payload.MessageId, StringComparison.Ordinal));
+        Assert.All(fixture.OpenCode.Payloads, payload => Assert.DoesNotContain(':', payload.MessageId));
         Assert.All(fixture.OpenCode.SessionIds, sessionId => Assert.Equal("session-1", sessionId));
         Assert.False(File.Exists(Path.Combine(fixture.ProjectDir, "prompts", "01-task.md")));
         Assert.True(File.Exists(Path.Combine(fixture.ProjectDir, "quality", "01-review.md")));
@@ -159,6 +161,50 @@ public sealed class QueueUseCasesTests
         Assert.False(result.IsSuccess);
         Assert.Empty(fixture.OpenCode.SentStepIds);
         Assert.Equal(RunStatus.Failed, result.Manifest!.Status);
+    }
+
+    [Fact]
+    public async Task ResumeAsync_WhenFailedBecauseMessageIdPayloadWasRejected_RetriesStepWithOpenCodeMessageId()
+    {
+        var fixture = await CreateFixtureAsync();
+        var taskPath = Path.Combine(fixture.ProjectDir, "prompts", "01-task.md");
+        await File.WriteAllTextAsync(taskPath, "task body");
+        var discovered = await new FileSystemPromptRepository().DiscoverAsync(fixture.Project, CancellationToken.None);
+        var task = discovered.TaskPrompts[0];
+        var runId = "20260626-144202-e4d3f8c6838";
+        await SaveActiveManifestAsync(fixture, runId, new RunManifest
+        {
+            RunId = runId,
+            ProjectId = fixture.Project.Id,
+            ProjectDirSnapshot = fixture.Project.ProjectDir,
+            SessionId = "session-existing",
+            Status = RunStatus.Failed,
+            CurrentStepIndex = 0,
+            LastError = "OpenCode server вернул HTTP 400 для POST /message: {\"name\":\"BadRequest\",\"data\":{\"message\":\"Expected a string starting with \\\"msg\\\", got \\\"20260626-144202-e4d3f8c6838:task:1\\\" at [\\\"messageID\\\"]\"}}",
+            TaskDescriptor = task,
+            Steps = [new WorkflowStep
+            {
+                Id = WorkflowStepId.Task,
+                Kind = Core.Prompts.PromptKind.Task,
+                SourcePath = task.Path,
+                ContentHash = task.ContentHash,
+                Status = WorkflowStepStatus.Failed,
+                SessionMessageId = "20260626-144202-e4d3f8c6838:task:1",
+                AttemptCount = 1
+            }],
+            CreatedAt = FixedNow,
+            StartedAt = FixedNow,
+            UpdatedAt = FixedNow
+        });
+
+        var result = await fixture.UseCases.ResumeAsync(fixture.ConfigPath, null, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        var payload = Assert.Single(fixture.OpenCode.Payloads);
+        Assert.StartsWith("msg", payload.MessageId, StringComparison.Ordinal);
+        Assert.DoesNotContain(':', payload.MessageId);
+        Assert.Equal("session-existing", fixture.OpenCode.SessionIds.Single());
+        Assert.Equal(RunStatus.Completed, result.Manifest!.Status);
     }
 
     [Fact]
