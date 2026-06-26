@@ -1,6 +1,8 @@
 # Example Config
 
-`queue-app.example.json` - валидный JSON без комментариев. Его можно скопировать в `opencode-queue.json` и заменить пути на реальные.
+`opencode-queue.json` - основной пример config для реального старта. `queue-app.example.json` - короткий demo alias. Оба файла являются валидным JSON без комментариев; можно скопировать любой из них в рабочий `opencode-queue.json` и заменить пути на реальные.
+
+`project-config.json` показывает один project profile как snippet для вставки в массив `projects`.
 
 Поля:
 
@@ -12,6 +14,10 @@
 - `promptsDir` - папка task prompts.
 - `qualityDir` - папка quality prompts.
 - `stateDir` - папка состояния runner.
+- `completedDir` - archive для успешно завершённых task prompts, обычно `.queue/completed`.
+- `openCodeOverrides` - настройки OpenCode для конкретного проекта поверх `defaults`.
+- `consoleVerbosity` - уровень CLI logging в консоль; runtime logs всегда находятся в `.queue/events.jsonl`, manifest и attempts logs.
+- `permissionPolicy` - безопасное значение по умолчанию `Manual`; dangerous auto-approve не включается автоматически.
 
 Правила путей:
 

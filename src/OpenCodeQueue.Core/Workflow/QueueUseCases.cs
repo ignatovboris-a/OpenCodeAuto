@@ -478,12 +478,22 @@ public sealed class QueueUseCases(
                 return await MarkStepCompletedAsync(project, manifest, stepIndex, result.MessageId, cancellationToken);
             }
 
+            if (classification.Kind == OpenCodeStepOutcomeKind.PermissionRequest && resilience.PermissionPolicy != PermissionPolicy.AutoApprove)
+            {
+                return await MarkManualAsync(project, manifest, classification.Message ?? "OpenCode запросил разрешение. Автоматическое подтверждение выключено по умолчанию.", cancellationToken);
+            }
+
+            if (classification.Kind == OpenCodeStepOutcomeKind.QuestionRequest && !resilience.AutoRespondToRecoverableQuestions)
+            {
+                return await MarkManualAsync(project, manifest, classification.Message ?? "OpenCode задал вопрос пользователю. Автоответы выключены.", cancellationToken);
+            }
+
             if (classification.Kind == OpenCodeStepOutcomeKind.NeedsManualIntervention)
             {
                 return await MarkManualAsync(project, manifest, classification.Message ?? "OpenCode запросил ручное вмешательство.", cancellationToken);
             }
 
-            if (classification.Kind == OpenCodeStepOutcomeKind.FatalFailure || !resilience.Enabled)
+            if (classification.Kind is OpenCodeStepOutcomeKind.FatalFailure or OpenCodeStepOutcomeKind.NonRecoverableError || !resilience.Enabled)
             {
                 return await MarkStepFailedAsync(project, manifest, stepIndex, classification.Message ?? result.ErrorMessage ?? "OpenCode не выполнил prompt успешно.", cancellationToken);
             }
@@ -503,10 +513,66 @@ public sealed class QueueUseCases(
                 manifest = await ScheduleTransportRetryAsync(project, manifest, stepIndex, resilience, cancellationToken);
             }
 
+            var readinessError = await WaitForSessionReadyForContinuationAsync(project, manifest, stepIndex, sessionId, resilience, cancellationToken);
+            if (readinessError is not null)
+            {
+                return await MarkManualAsync(project, manifest, readinessError, cancellationToken);
+            }
+
             currentPayload = BuildContinuationPayload(manifest, manifest.Steps[stepIndex]);
             continuation = true;
             await AppendEventAsync(project, QueueEventTypes.ContinuationPromptSent, manifest.RunId, step.Id.Value, sessionId, manifest.TaskDescriptor?.FileName, "Continuation prompt отправлен в ту же sessionId.", cancellationToken);
         }
+    }
+
+    private async Task<string?> WaitForSessionReadyForContinuationAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string sessionId, ResilienceSettings resilience, CancellationToken cancellationToken)
+    {
+        var deadline = clock.Now.AddMinutes(Math.Max(1, resilience.StepTimeoutMinutes));
+        var step = manifest.Steps[stepIndex];
+        var maxChecks = Math.Max(1, resilience.MaxTransportRetriesPerAttempt + resilience.MaxContinuationAttemptsPerStep + 1);
+        for (var check = 0; check < maxChecks && clock.Now <= deadline; check++)
+        {
+            OpenCodeSessionStatus status;
+            try
+            {
+                status = await openCodeClient.GetSessionStatusAsync(project, sessionId, cancellationToken);
+            }
+            catch (OpenCodeClientException exception) when (IsRecoverableTransportException(exception) || IsTimeoutException(exception))
+            {
+                await AppendEventAsync(project, QueueEventTypes.TransportRetryScheduled, manifest.RunId, step.Id.Value, sessionId, manifest.TaskDescriptor?.FileName, "Не удалось проверить статус session перед continuation: " + exception.Message, cancellationToken);
+                await DelayBeforeStatusRetryAsync(resilience, cancellationToken);
+                continue;
+            }
+
+            if (status.State is OpenCodeSessionState.Idle or OpenCodeSessionState.Unknown)
+            {
+                return null;
+            }
+
+            if (status.State == OpenCodeSessionState.Retry)
+            {
+                await AppendEventAsync(project, QueueEventTypes.TransportRetryScheduled, manifest.RunId, step.Id.Value, sessionId, manifest.TaskDescriptor?.FileName, "OpenCode session сейчас во встроенном retry. Continuation пока не отправляется.", cancellationToken);
+                await DelayBeforeStatusRetryAsync(resilience, cancellationToken);
+                continue;
+            }
+
+            if (status.State == OpenCodeSessionState.Busy)
+            {
+                await AppendEventAsync(project, QueueEventTypes.TransportRetryScheduled, manifest.RunId, step.Id.Value, sessionId, manifest.TaskDescriptor?.FileName, "OpenCode session занята. Continuation будет отправлен только после Idle.", cancellationToken);
+                await DelayBeforeStatusRetryAsync(resilience, cancellationToken);
+                continue;
+            }
+
+            return $"OpenCode session перешла в статус {status.State}. Continuation не отправлен; требуется ручное вмешательство.";
+        }
+
+        return "Не удалось дождаться Idle status перед continuation. Очередь остановлена, task prompt не архивирован.";
+    }
+
+    private static Task DelayBeforeStatusRetryAsync(ResilienceSettings resilience, CancellationToken cancellationToken)
+    {
+        var delay = Math.Max(0, resilience.RetryDelaySeconds);
+        return delay == 0 ? Task.CompletedTask : Task.Delay(TimeSpan.FromSeconds(delay), cancellationToken);
     }
 
     private async Task<RunManifest> RecordAttemptAsync(ProjectProfile project, RunManifest manifest, int stepIndex, OpenCodeMessageResult result, StepClassification classification, bool isContinuation, CancellationToken cancellationToken)

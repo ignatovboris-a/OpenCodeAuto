@@ -1,15 +1,17 @@
 {
-  "schemaVersion": 1,
-  "activeProjectId": "project-a",
-  "defaults": {
+  "id": "my-project",
+  "displayName": "My Project",
+  "projectDir": "C:/dev/my-project",
+  "promptsDir": "prompts",
+  "qualityDir": "quality",
+  "stateDir": ".queue",
+  "completedDir": ".queue/completed",
+  "stopOnQualityFailure": true,
+  "openCodeOverrides": {
     "openCodeMode": "Server",
-    "openCodeExecutable": "opencode",
     "serverUrl": "http://localhost:4096",
     "manageOpenCodeServer": true,
-    "serverUsername": "opencode",
-    "serverPassword": null,
     "promptTransport": "Auto",
-    "maxInlinePromptChars": 24000,
     "consoleVerbosity": "Normal",
     "resilience": {
       "enabled": true,
@@ -26,23 +28,5 @@
       "permissionPolicy": "Manual",
       "continuationPrompt": null
     }
-  },
-  "projects": [
-    {
-      "id": "project-a",
-      "displayName": "Project A",
-      "projectDir": "C:/dev/project-a",
-      "promptsDir": "prompts",
-      "qualityDir": "quality",
-      "stateDir": ".queue"
-    },
-    {
-      "id": "project-b",
-      "displayName": "Project B",
-      "projectDir": "/home/user/dev/project-b",
-      "promptsDir": "prompts",
-      "qualityDir": "quality",
-      "stateDir": ".queue"
-    }
-  ]
+  }
 }

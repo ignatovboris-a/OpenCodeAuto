@@ -130,6 +130,27 @@ public sealed class OpenCodeCliClientTests
     }
 
     [Fact]
+    public async Task SendPromptAsync_WhenJsonStreamContainsTerminatedWithZeroExit_ReturnsFailureForClassifier()
+    {
+        var root = NewProjectDir();
+        var runner = new FakeProcessRunner(new ProcessRunResult(0, "{\"type\":\"error\",\"message\":\"Tool execution aborted\"}\n{\"messageId\":\"msg-1\"}", string.Empty));
+        var client = new OpenCodeCliClient(runner);
+
+        var result = await client.SendPromptAsync(Project(root), "ses-1", new PromptPayload
+        {
+            Content = "prompt",
+            SourcePath = Path.Combine(root, "prompts", "01.md"),
+            MessageId = "msg-1",
+            Transport = PromptTransport.Inline
+        }, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("Tool execution aborted", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, result.ExitCode);
+        Assert.DoesNotContain("--continue", runner.Requests.Single().Arguments);
+    }
+
+    [Fact]
     public async Task StartSessionAsync_UsesSessionCreateTitleDirAndJson()
     {
         var root = NewProjectDir();

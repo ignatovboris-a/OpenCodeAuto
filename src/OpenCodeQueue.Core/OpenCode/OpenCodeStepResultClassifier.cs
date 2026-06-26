@@ -26,6 +26,29 @@ public sealed class OpenCodeStepResultClassifier : IOpenCodeRunClassifier
         "socket hang up"
     ];
 
+    private static readonly string[] PermissionMarkers =
+    [
+        "permission request",
+        "permission required",
+        "requires permission",
+        "permission denied",
+        "approval required",
+        "approve tool",
+        "разрешение",
+        "требуется подтверждение"
+    ];
+
+    private static readonly string[] QuestionMarkers =
+    [
+        "question:",
+        "clarification",
+        "needs clarification",
+        "please clarify",
+        "уточните",
+        "нужны уточнения",
+        "вопрос пользователю"
+    ];
+
     private static readonly string[] FatalCliMarkers =
     [
         "unknown argument",
@@ -45,6 +68,16 @@ public sealed class OpenCodeStepResultClassifier : IOpenCodeRunClassifier
             return new StepClassification(OpenCodeStepOutcomeKind.NeedsManualIntervention, "needs-manual", ExtractNeedsManualReason(text));
         }
 
+        if (ContainsPermissionRequest(text))
+        {
+            return new StepClassification(OpenCodeStepOutcomeKind.PermissionRequest, "permission-request", "OpenCode запросил разрешение. По умолчанию требуется ручное вмешательство.");
+        }
+
+        if (ContainsQuestionRequest(text))
+        {
+            return new StepClassification(OpenCodeStepOutcomeKind.QuestionRequest, "question-request", "OpenCode задал уточняющий вопрос.");
+        }
+
         if (result.IsSuccess)
         {
             return new StepClassification(OpenCodeStepOutcomeKind.Completed, null, "OpenCode завершил шаг успешно.");
@@ -58,7 +91,7 @@ public sealed class OpenCodeStepResultClassifier : IOpenCodeRunClassifier
         if (result.IsTransportError || result.IsTimeout)
         {
             var signature = result.IsTimeout ? "timeout" : NormalizeSignature(text, result.ExitCode);
-            return new StepClassification(OpenCodeStepOutcomeKind.RecoverableInterruption, signature, result.ErrorMessage ?? "Transport/timeout interruption.");
+            return new StepClassification(OpenCodeStepOutcomeKind.RecoverableTransportError, signature, result.ErrorMessage ?? "Transport/timeout interruption.");
         }
 
         if (ContainsFatalCliMarker(text))
@@ -68,10 +101,14 @@ public sealed class OpenCodeStepResultClassifier : IOpenCodeRunClassifier
 
         if (ContainsRecoverableMarker(text, resilience))
         {
-            return new StepClassification(OpenCodeStepOutcomeKind.RecoverableInterruption, NormalizeSignature(text, result.ExitCode), result.ErrorMessage ?? "OpenCode execution interrupted.");
+            var signature = NormalizeSignature(text, result.ExitCode);
+            var kind = signature.Contains("tool execution aborted", StringComparison.OrdinalIgnoreCase) || signature.Contains("terminated", StringComparison.OrdinalIgnoreCase)
+                ? OpenCodeStepOutcomeKind.RecoverableToolAbort
+                : OpenCodeStepOutcomeKind.RecoverableInterruption;
+            return new StepClassification(kind, signature, result.ErrorMessage ?? "OpenCode execution interrupted.");
         }
 
-        return new StepClassification(OpenCodeStepOutcomeKind.FatalFailure, NormalizeSignature(text, result.ExitCode), result.ErrorMessage);
+        return new StepClassification(OpenCodeStepOutcomeKind.NonRecoverableError, NormalizeSignature(text, result.ExitCode), result.ErrorMessage);
     }
 
     private static bool ContainsRecoverableMarker(string text, ResilienceSettings resilience)
@@ -105,6 +142,16 @@ public sealed class OpenCodeStepResultClassifier : IOpenCodeRunClassifier
     private static bool ContainsNeedsManualIntervention(string text)
     {
         return text.Contains("NEEDS_MANUAL_INTERVENTION:", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ContainsPermissionRequest(string text)
+    {
+        return PermissionMarkers.Any(marker => text.Contains(marker, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool ContainsQuestionRequest(string text)
+    {
+        return QuestionMarkers.Any(marker => text.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string ExtractNeedsManualReason(string text)

@@ -17,5 +17,12 @@ var services = new ServiceCollection()
     .AddSingleton<QueueCliApplication>()
     .BuildServiceProvider();
 
+using var cancellation = new CancellationTokenSource();
+Console.CancelKeyPress += (_, eventArgs) =>
+{
+    eventArgs.Cancel = true;
+    cancellation.Cancel();
+};
+
 var app = services.GetRequiredService<QueueCliApplication>();
-return await app.RunAsync(args, CancellationToken.None);
+return await app.RunAsync(args, cancellation.Token);

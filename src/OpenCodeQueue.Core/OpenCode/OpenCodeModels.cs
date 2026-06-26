@@ -20,9 +20,17 @@ public sealed record OpenCodeSessionStatus(OpenCodeSessionState State, string? M
 public enum OpenCodeStepOutcomeKind
 {
     Completed,
+    Busy,
+    BuiltInRetryInProgress,
+    RecoverableToolAbort,
+    RecoverableTransportError,
     RecoverableInterruption,
+    PermissionRequest,
+    QuestionRequest,
     NeedsManualIntervention,
-    FatalFailure
+    FatalFailure,
+    NonRecoverableError,
+    Unknown
 }
 
 public sealed record OpenCodeMessageResult(

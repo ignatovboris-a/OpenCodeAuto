@@ -329,6 +329,26 @@ public sealed class QueueUseCasesTests
     }
 
     [Fact]
+    public async Task RunQueueAsync_WhenSessionBusyAfterInterruption_WaitsForIdleBeforeContinuation()
+    {
+        var fixture = await CreateFixtureAsync(settings: FastRecoverySettings(), scriptedResults: new Dictionary<string, Queue<OpenCodeMessageResult>>
+        {
+            ["task"] = new([Interrupted("Tool execution aborted"), Success("task-continuation")])
+        }, statusResults: new Queue<OpenCodeSessionStatus>([
+            new(OpenCodeSessionState.Busy),
+            new(OpenCodeSessionState.Retry, "built-in retry"),
+            new(OpenCodeSessionState.Idle)
+        ]));
+        await File.WriteAllTextAsync(Path.Combine(fixture.ProjectDir, "prompts", "01-task.md"), "task body");
+
+        var result = await fixture.UseCases.RunQueueAsync(fixture.ConfigPath, null, once: true, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(["task", "task"], fixture.OpenCode.SentStepIds);
+        Assert.Equal(3, fixture.OpenCode.StatusRequests);
+    }
+
+    [Fact]
     public async Task RunQueueAsync_WhenQualityIsTerminated_ArchivesOnlyAfterContinuationSuccess()
     {
         var fixture = await CreateFixtureAsync(settings: FastRecoverySettings(), scriptedResults: new Dictionary<string, Queue<OpenCodeMessageResult>>
@@ -393,6 +413,23 @@ public sealed class QueueUseCasesTests
         Assert.False(result.IsSuccess);
         Assert.Equal(RunStatus.NeedsManualIntervention, result.Manifest!.Status);
         Assert.Contains("нужен токен", result.Manifest.LastError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunQueueAsync_WhenPermissionRequestReturned_StopsForManualIntervention()
+    {
+        var fixture = await CreateFixtureAsync(settings: FastRecoverySettings(), scriptedResults: new Dictionary<string, Queue<OpenCodeMessageResult>>
+        {
+            ["task"] = new([new OpenCodeMessageResult(false, LastAssistantText: "permission request: approve shell command")])
+        });
+        await File.WriteAllTextAsync(Path.Combine(fixture.ProjectDir, "prompts", "01-task.md"), "task body");
+
+        var result = await fixture.UseCases.RunQueueAsync(fixture.ConfigPath, null, once: true, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(RunStatus.NeedsManualIntervention, result.Manifest!.Status);
+        Assert.Contains("разреш", result.Manifest.LastError, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(Path.Combine(fixture.ProjectDir, "prompts", "01-task.md")));
     }
 
     [Fact]
@@ -470,7 +507,7 @@ public sealed class QueueUseCasesTests
         Assert.Contains("server down", manifest.LastError, StringComparison.Ordinal);
     }
 
-    private static async Task<Fixture> CreateFixtureAsync(string? failStepId = null, bool changeTaskBeforeArchive = false, bool stopOnQualityFailure = true, OpenCodeSettings? settings = null, Exception? ensureReadyException = null, Exception? abortSessionException = null, Exception? getSessionException = null, Dictionary<string, Queue<OpenCodeMessageResult>>? scriptedResults = null)
+    private static async Task<Fixture> CreateFixtureAsync(string? failStepId = null, bool changeTaskBeforeArchive = false, bool stopOnQualityFailure = true, OpenCodeSettings? settings = null, Exception? ensureReadyException = null, Exception? abortSessionException = null, Exception? getSessionException = null, Dictionary<string, Queue<OpenCodeMessageResult>>? scriptedResults = null, Queue<OpenCodeSessionStatus>? statusResults = null)
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
         var projectDir = Path.Combine(root, "project");
@@ -482,7 +519,7 @@ public sealed class QueueUseCasesTests
         var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir, StopOnQualityFailure = stopOnQualityFailure, OpenCodeOverrides = settings ?? new OpenCodeSettings() };
         await registry.AddOrUpdateAsync(configPath, project, CancellationToken.None);
         var stateStore = new JsonStateStore();
-        var openCode = new FakeOpenCodeClient(failStepId, changeTaskBeforeArchive, ensureReadyException, abortSessionException, getSessionException, scriptedResults);
+        var openCode = new FakeOpenCodeClient(failStepId, changeTaskBeforeArchive, ensureReadyException, abortSessionException, getSessionException, scriptedResults, statusResults);
         var useCases = new QueueUseCases(
             registry,
             new FileSystemPromptRepository(),
@@ -526,15 +563,18 @@ public sealed class QueueUseCasesTests
 
     private static OpenCodeMessageResult Success(string messageId) => new(true, messageId, true);
 
-    private sealed class FakeOpenCodeClient(string? failStepId, bool changeTaskBeforeArchive, Exception? ensureReadyException, Exception? abortSessionException, Exception? getSessionException, Dictionary<string, Queue<OpenCodeMessageResult>>? scriptedResults) : IOpenCodeClient
+    private sealed class FakeOpenCodeClient(string? failStepId, bool changeTaskBeforeArchive, Exception? ensureReadyException, Exception? abortSessionException, Exception? getSessionException, Dictionary<string, Queue<OpenCodeMessageResult>>? scriptedResults, Queue<OpenCodeSessionStatus>? statusResults) : IOpenCodeClient
     {
         private readonly Dictionary<string, Queue<OpenCodeMessageResult>> scripts = scriptedResults ?? [];
+        private readonly Queue<OpenCodeSessionStatus> statuses = statusResults ?? [];
 
         public List<string> SentStepIds { get; } = [];
 
         public List<string> SessionIds { get; } = [];
 
         public List<PromptPayload> Payloads { get; } = [];
+
+        public int StatusRequests { get; private set; }
 
         public Task EnsureReadyAsync(ProjectProfile project, CancellationToken cancellationToken)
         {
@@ -560,7 +600,8 @@ public sealed class QueueUseCasesTests
 
         public Task<OpenCodeSessionStatus> GetSessionStatusAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
         {
-            return Task.FromResult(new OpenCodeSessionStatus(OpenCodeSessionState.Idle));
+            StatusRequests++;
+            return Task.FromResult(statuses.Count > 0 ? statuses.Dequeue() : new OpenCodeSessionStatus(OpenCodeSessionState.Idle));
         }
 
         public Task AbortSessionAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)

@@ -11,7 +11,10 @@ public sealed class FileSystemArchiver : IFileArchiver
         cancellationToken.ThrowIfCancellationRequested();
         if (!File.Exists(taskPrompt.Path))
         {
-            return new ArchiveCompletedTaskResult(false, ErrorMessage: $"Source task prompt отсутствует, архивирование остановлено: {taskPrompt.Path}");
+            var archived = await TryFindExistingArchiveAsync(project, taskPrompt, expectedContentHash, cancellationToken);
+            return archived is null
+                ? new ArchiveCompletedTaskResult(false, ErrorMessage: $"Source task prompt отсутствует, архивирование остановлено: {taskPrompt.Path}")
+                : new ArchiveCompletedTaskResult(true, archived);
         }
 
         var currentHash = await FileHash.ComputeSha256Async(taskPrompt.Path, cancellationToken);
@@ -25,6 +28,27 @@ public sealed class FileSystemArchiver : IFileArchiver
         var destination = GetUniqueDestination(completedDir, completedAt, taskPrompt.FileName);
         File.Move(taskPrompt.Path, destination, overwrite: false);
         return new ArchiveCompletedTaskResult(true, destination);
+    }
+
+    private static async Task<string?> TryFindExistingArchiveAsync(ProjectProfile project, PromptDescriptor taskPrompt, string expectedContentHash, CancellationToken cancellationToken)
+    {
+        var completedDir = ProjectPaths.CompletedDir(project);
+        if (!Directory.Exists(completedDir))
+        {
+            return null;
+        }
+
+        foreach (var candidate in Directory.EnumerateFiles(completedDir, "*_" + taskPrompt.FileName, SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var hash = await FileHash.ComputeSha256Async(candidate, cancellationToken);
+            if (string.Equals(hash, expectedContentHash, StringComparison.OrdinalIgnoreCase))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
     }
 
     private static string GetUniqueDestination(string completedDir, DateTimeOffset completedAt, string fileName)

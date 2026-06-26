@@ -20,6 +20,12 @@ public enum ConsoleVerbosity
     Detailed
 }
 
+public enum PermissionPolicy
+{
+    Manual,
+    AutoApprove
+}
+
 public sealed record OpenCodeSettings
 {
     public OpenCodeMode OpenCodeMode { get; init; } = OpenCodeMode.Server;
@@ -77,7 +83,9 @@ public sealed record ResilienceSettings
 
     public bool RecoverOnToolExecutionAborted { get; init; } = true;
 
-    public bool AutoRespondToRecoverableQuestions { get; init; } = true;
+    public bool AutoRespondToRecoverableQuestions { get; init; }
+
+    public PermissionPolicy PermissionPolicy { get; init; } = PermissionPolicy.Manual;
 
     public string? ContinuationPrompt { get; init; }
 }

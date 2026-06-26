@@ -74,9 +74,15 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
         var finishedAt = DateTimeOffset.UtcNow;
         var stdoutPath = TryGetLogPath(project, payload.RunId, payload.MessageId, "stdout");
         var stderrPath = TryGetLogPath(project, payload.RunId, payload.MessageId, "stderr");
+        var structuredFailure = TryReadStructuredFailure(result.StandardOutput, result.StandardError);
         if (result.ExitCode != 0)
         {
-            return new OpenCodeMessageResult(false, payload.MessageId, false, $"OpenCode CLI завершился с кодом {result.ExitCode}.", result.ExitCode, result.StandardOutput, result.StandardError, StartedAt: startedAt, FinishedAt: finishedAt, StdoutLogPath: stdoutPath, StderrLogPath: stderrPath);
+            return new OpenCodeMessageResult(false, payload.MessageId, false, structuredFailure ?? $"OpenCode CLI завершился с кодом {result.ExitCode}.", result.ExitCode, result.StandardOutput, result.StandardError, StartedAt: startedAt, FinishedAt: finishedAt, StdoutLogPath: stdoutPath, StderrLogPath: stderrPath);
+        }
+
+        if (structuredFailure is not null)
+        {
+            return new OpenCodeMessageResult(false, payload.MessageId, false, structuredFailure, result.ExitCode, result.StandardOutput, result.StandardError, StartedAt: startedAt, FinishedAt: finishedAt, StdoutLogPath: stdoutPath, StderrLogPath: stderrPath);
         }
 
         var messageId = TryReadMessageId(result.StandardOutput) ?? payload.MessageId;
@@ -181,6 +187,79 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
     }
 
     private static string? TryReadMessageId(string json) => TryReadStringFromJson(json, "messageId", "messageID", "message_id", "id");
+
+    private static string? TryReadStructuredFailure(string stdout, string stderr)
+    {
+        var text = string.Join('\n', EnumerateJsonEventText(stdout).Concat(EnumerateJsonEventText(stderr)).Concat([stdout, stderr]));
+        if (ContainsAny(text, "Tool execution aborted", "terminated", "process terminated", "connection reset", "ECONNRESET", "ETIMEDOUT", "socket hang up", "request timeout", "idle timeout", "network error"))
+        {
+            return FirstUsefulLine(text) ?? "OpenCode CLI сообщил recoverable interruption.";
+        }
+
+        if (ContainsAny(text, "permission request", "permission required", "requires permission", "approval required", "approve tool", "разрешение", "требуется подтверждение"))
+        {
+            return FirstUsefulLine(text) ?? "OpenCode CLI запросил разрешение.";
+        }
+
+        if (ContainsAny(text, "NEEDS_MANUAL_INTERVENTION:", "needs clarification", "please clarify", "question:", "уточните", "нужны уточнения"))
+        {
+            return FirstUsefulLine(text) ?? "OpenCode CLI запросил ручное вмешательство.";
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> EnumerateJsonEventText(string text)
+    {
+        foreach (var line in text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmed = line.Trim();
+            if (!trimmed.StartsWith('{'))
+            {
+                continue;
+            }
+
+            using var document = TryParseJson(trimmed);
+            if (document is null)
+            {
+                continue;
+            }
+
+            var root = document.RootElement;
+            foreach (var name in new[] { "message", "error", "text", "type", "status", "event" })
+            {
+                var value = JsonElementReader.FindString(root, name);
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    yield return value;
+                }
+            }
+        }
+    }
+
+    private static JsonDocument? TryParseJson(string text)
+    {
+        try
+        {
+            return JsonDocument.Parse(text);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool ContainsAny(string text, params string[] markers)
+    {
+        return markers.Any(marker => text.Contains(marker, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string? FirstUsefulLine(string text)
+    {
+        return text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Trim())
+            .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
+    }
 
     private static string? TryReadStringFromJson(string text, params string[] names)
     {

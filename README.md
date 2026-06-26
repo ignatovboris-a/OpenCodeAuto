@@ -87,7 +87,7 @@ opencode-queue.json
   projects[]
 ```
 
-Пример есть в `examples/queue-app.example.json`.
+Канонический пример есть в `examples/opencode-queue.json`. Старый alias `examples/queue-app.example.json` оставлен как короткий demo config.
 
 Правила путей в текущей реализации:
 
@@ -131,7 +131,7 @@ opencode-queue
 01.md
 01-add-auth.md
 0.1.md
-0.1. auth.md
+0.1 task.md
 0.0.2-refactor.md
 ```
 
@@ -174,7 +174,7 @@ quality prompt 03
 
 ## Resilience И Continuation
 
-`terminated`, `Tool execution aborted`, `aborted`, `cancelled`, `connection reset`, `timeout`, `network error`, `ECONNRESET`, `ETIMEDOUT` и похожие признаки не считаются успешным завершением шага. Runner классифицирует их как recoverable interruption, сохраняет состояние текущего logical step и отправляет continuation prompt в ту же `sessionId`.
+`terminated`, `Tool execution aborted`, `process terminated`, `connection reset`, `request timeout`, `idle timeout`, `network error`, `ECONNRESET`, `ETIMEDOUT` и похожие признаки не считаются успешным завершением шага. Runner классифицирует их как recoverable interruption, сохраняет состояние текущего logical step, перечитывает status OpenCode session и отправляет continuation prompt в ту же `sessionId` только после того, как session не находится в `busy` или встроенном `retry`.
 
 После recoverable interruption исходный task или quality prompt не отправляется повторно. Continuation prompt просит OpenCode продолжить с последнего фактически выполненного действия, проверить `git diff`, состояние файлов и результаты команд. Quality prompts запускаются только после успешного task step, а task prompt переносится в archive/completed только после успешного завершения task и всех quality prompts.
 
@@ -193,13 +193,16 @@ quality prompt 03
     "stopAfterSameSignatureRepeats": 3,
     "detectTerminatedText": true,
     "recoverOnToolExecutionAborted": true,
-    "autoRespondToRecoverableQuestions": true,
+    "autoRespondToRecoverableQuestions": false,
+    "permissionPolicy": "Manual",
     "continuationPrompt": null
   }
 }
 ```
 
 Лимиты нужны для защиты от бесконечного цикла одной и той же ошибки. Если превышен лимит continuation attempts, transport retries или повторов одинаковой signature, run переходит в `NeedsManualIntervention`, очередь останавливается, а task prompt остаётся в `prompts`.
+
+Permission requests и уточняющие вопросы обрабатываются отдельно от технических прерываний. По умолчанию permission request переводит run в `NeedsManualIntervention`; dangerous/permissive режим не включается автоматически. Вопросы пользователя также останавливают run, если `autoRespondToRecoverableQuestions` явно не включён и continuation prompt не может безопасно продолжить работу в рамках исходного задания.
 
 ## Recovery После Crash
 
@@ -292,6 +295,7 @@ CLI fallback полезен как запасной режим, но имеет 
 - recovery безопасен только при известном `sessionId`;
 - нельзя полагаться на неявное `--continue`;
 - stdout/stderr классифицируются, поэтому ненулевой exit code с `Tool execution aborted` считается recoverable interruption, а не немедленным fatal failure;
+- JSON-line/event output от `--format json` анализируется построчно; `terminated` или `Tool execution aborted` не считаются success даже при exit code `0`;
 - диагностика статуса беднее, чем через Server API.
 
 Для полноценного recovery предпочтителен OpenCode Server API с сохранённым `sessionId`. CLI fallback ограничен, если конкретную сессию нельзя надёжно восстановить.
@@ -393,6 +397,8 @@ Trade-offs:
 
 ```text
 examples/
+  opencode-queue.json
+  project-config.json
   queue-app.example.json
   queue-app.example.md
   prompts/
@@ -403,7 +409,9 @@ examples/
     03-final-report.md
 ```
 
-`queue-app.example.json` является валидным JSON без комментариев. Пояснения вынесены в `queue-app.example.md`.
+`opencode-queue.json` и `queue-app.example.json` являются валидными JSON без комментариев. `project-config.json` показывает один project profile как snippet для вставки в `projects[]`. Пояснения вынесены в `queue-app.example.md`.
+
+Подробные recovery-инструкции есть в `docs/troubleshooting.md`.
 
 ## Security Notes
 
