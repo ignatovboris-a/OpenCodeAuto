@@ -102,6 +102,46 @@ public sealed class FileSystemPromptRepositoryTests
     }
 
     [Fact]
+    public async Task DiscoverAsync_OrdersRequiredNumberedFormatsAndWarnsForUnprefixedFiles()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
+        var prompts = Path.Combine(root, "prompts");
+        Directory.CreateDirectory(prompts);
+        foreach (var fileName in new[]
+        {
+            "01.md",
+            "1.md",
+            "01-task.md",
+            "01 task.md",
+            "01.task.md",
+            "0.1.md",
+            "0.1. task.md",
+            "0.0.2-refactor.md",
+            "1.10.md",
+            "1.2.md",
+            "notes.md"
+        })
+        {
+            await File.WriteAllTextAsync(Path.Combine(prompts, fileName), fileName);
+        }
+
+        var result = await new FileSystemPromptRepository().DiscoverAsync(new ProjectProfile { Id = "test", ProjectDir = root }, CancellationToken.None);
+
+        Assert.Equal([
+            "0.0.2-refactor.md",
+            "0.1. task.md",
+            "0.1.md",
+            "01 task.md",
+            "01-task.md",
+            "01.md",
+            "01.task.md",
+            "1.md",
+            "1.2.md",
+            "1.10.md"], result.TaskPrompts.Select(prompt => prompt.FileName));
+        Assert.Contains(result.Warnings, warning => warning.Contains("notes.md", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task DiscoverAsync_OrdersEqualNumericKeysByFileNameThenPath()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));

@@ -1,6 +1,7 @@
 using OpenCodeQueue.Core.Configuration;
 using OpenCodeQueue.Core.Discovery;
 using OpenCodeQueue.Core.Ports;
+using OpenCodeQueue.Infrastructure.Json;
 using System.Text.Json;
 
 namespace OpenCodeQueue.Infrastructure.Discovery;
@@ -139,9 +140,7 @@ public sealed class CompositeProjectDiscoveryService(IAppConfigStore configStore
 
     private static string? ReadString(JsonElement element, string propertyName)
     {
-        return element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
-            ? property.GetString()
-            : null;
+        return JsonElementReader.ReadString(element, propertyName);
     }
 
     private static string Slug(string value)

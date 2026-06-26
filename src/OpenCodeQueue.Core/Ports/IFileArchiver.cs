@@ -5,5 +5,7 @@ namespace OpenCodeQueue.Core.Ports;
 
 public interface IFileArchiver
 {
-    Task ArchiveCompletedTaskAsync(ProjectProfile project, PromptDescriptor taskPrompt, CancellationToken cancellationToken);
+    Task<ArchiveCompletedTaskResult> ArchiveCompletedTaskAsync(ProjectProfile project, PromptDescriptor taskPrompt, string expectedContentHash, DateTimeOffset completedAt, CancellationToken cancellationToken);
 }
+
+public sealed record ArchiveCompletedTaskResult(bool IsSuccess, string? ArchivedPath = null, string? ErrorMessage = null);

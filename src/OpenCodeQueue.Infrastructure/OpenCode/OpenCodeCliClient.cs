@@ -3,14 +3,13 @@ using OpenCodeQueue.Core.Configuration;
 using OpenCodeQueue.Core.OpenCode;
 using OpenCodeQueue.Core.Ports;
 using OpenCodeQueue.Core.State;
+using OpenCodeQueue.Infrastructure.Json;
 
 namespace OpenCodeQueue.Infrastructure.OpenCode;
 
 public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeClient
 {
     private const string AttachmentInstruction = "Выполни инструкции из прикреплённого Markdown-файла.";
-    private const string InitializationPrompt = "OpenCodeQueue: создана новая session для последовательного выполнения prompt workflow. Дождись следующих инструкций.";
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public Task EnsureReadyAsync(ProjectProfile project, CancellationToken cancellationToken)
     {
@@ -22,18 +21,17 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
         return Task.CompletedTask;
     }
 
-    public async Task<OpenCodeSession> CreateSessionAsync(ProjectProfile project, string title, CancellationToken cancellationToken)
+    public async Task<OpenCodeSession> StartSessionAsync(ProjectProfile project, string title, CancellationToken cancellationToken)
     {
         await EnsureReadyAsync(project, cancellationToken);
         var uniqueTitle = title.Contains("run", StringComparison.OrdinalIgnoreCase) ? title : $"{title} run-{Guid.NewGuid():N}";
-        var arguments = BaseRunArguments(project.ProjectDir);
+        var arguments = new List<string> { "session", "create", "--dir", project.ProjectDir };
         arguments.Add("--title");
         arguments.Add(uniqueTitle);
         arguments.Add("--format");
         arguments.Add("json");
-        arguments.Add(InitializationPrompt);
 
-        var result = await RunCliAsync(project, arguments, null, null, cancellationToken);
+        var result = await RunCliAsync(project, arguments, null, "session-create", cancellationToken);
         EnsureExitCode(result, "создать session через OpenCode CLI");
 
         var sessionId = TryReadSessionId(result.StandardOutput);
@@ -65,31 +63,12 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
         }
 
         await EnsureReadyAsync(project, cancellationToken);
-        var transport = payload.Transport == PromptTransport.Auto
-            ? payload.Content.Length <= payload.MaxInlinePromptChars ? PromptTransport.Inline : PromptTransport.FileAttachment
-            : payload.Transport;
-
         var arguments = BaseRunArguments(project.ProjectDir);
         arguments.Add("--session");
         arguments.Add(sessionId);
         arguments.Add("--format");
         arguments.Add("json");
-
-        if (transport == PromptTransport.FileAttachment)
-        {
-            if (!File.Exists(payload.SourcePath))
-            {
-                throw new OpenCodeClientException($"Prompt-файл для attachment не найден: {payload.SourcePath}");
-            }
-
-            arguments.Add("--file");
-            arguments.Add(payload.SourcePath);
-            arguments.Add(AttachmentInstruction);
-        }
-        else
-        {
-            arguments.Add(payload.Content);
-        }
+        AddPromptArguments(arguments, payload);
 
         var result = await RunCliAsync(project, arguments, payload.RunId, payload.StepId ?? payload.MessageId, cancellationToken);
         if (result.ExitCode != 0)
@@ -135,7 +114,7 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
 
     private async Task<string?> FindSessionByTitleAsync(ProjectProfile project, string title, CancellationToken cancellationToken)
     {
-        var arguments = new List<string> { "session", "list", "--format", "json" };
+        var arguments = new List<string> { "session", "list", "--dir", project.ProjectDir, "--format", "json" };
         var result = await RunCliAsync(project, arguments, null, null, cancellationToken);
         EnsureExitCode(result, "получить список session OpenCode CLI");
         var matches = ReadSessions(result.StandardOutput).Where(item => string.Equals(item.Title, title, StringComparison.Ordinal)).ToList();
@@ -162,6 +141,28 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
 
     private static List<string> BaseRunArguments(string projectDir) => ["run", "--dir", projectDir];
 
+    private static void AddPromptArguments(List<string> arguments, PromptPayload payload)
+    {
+        var transport = payload.Transport == PromptTransport.Auto
+            ? payload.Content.Length <= payload.MaxInlinePromptChars ? PromptTransport.Inline : PromptTransport.FileAttachment
+            : payload.Transport;
+
+        if (transport == PromptTransport.FileAttachment)
+        {
+            if (!File.Exists(payload.SourcePath))
+            {
+                throw new OpenCodeClientException($"Prompt-файл для attachment не найден: {payload.SourcePath}");
+            }
+
+            arguments.Add("--file");
+            arguments.Add(payload.SourcePath);
+            arguments.Add(AttachmentInstruction);
+            return;
+        }
+
+        arguments.Add(payload.Content);
+    }
+
     private static void EnsureExitCode(ProcessRunResult result, string operation)
     {
         if (result.ExitCode != 0)
@@ -170,7 +171,37 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
         }
     }
 
-    private static string? TryReadSessionId(string json) => TryReadStringFromJson(json, "sessionId", "sessionID", "session_id", "id");
+    private static string? TryReadSessionId(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(ExtractJson(text));
+            var explicitId = JsonElementReader.FindString(document.RootElement, "sessionId", "sessionID", "session_id", "id");
+            if (!string.IsNullOrWhiteSpace(explicitId))
+            {
+                return explicitId;
+            }
+
+            if (document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("session", out var sessionElement))
+            {
+                return sessionElement.ValueKind == JsonValueKind.String
+                    ? sessionElement.GetString()
+                    : JsonElementReader.ReadString(sessionElement, "id");
+            }
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        return null;
+    }
 
     private static string? TryReadMessageId(string json) => TryReadStringFromJson(json, "messageId", "messageID", "message_id", "id");
 
@@ -183,8 +214,8 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
 
         try
         {
-            using var document = JsonDocument.Parse(text);
-            return FindString(document.RootElement, new HashSet<string>(names, StringComparer.OrdinalIgnoreCase));
+            using var document = JsonDocument.Parse(ExtractJson(text));
+            return JsonElementReader.FindString(document.RootElement, names);
         }
         catch (JsonException)
         {
@@ -192,44 +223,11 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
         }
     }
 
-    private static string? FindString(JsonElement element, IReadOnlySet<string> names)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var property in element.EnumerateObject())
-            {
-                if (names.Contains(property.Name) && property.Value.ValueKind == JsonValueKind.String)
-                {
-                    return property.Value.GetString();
-                }
-
-                var nested = FindString(property.Value, names);
-                if (!string.IsNullOrWhiteSpace(nested))
-                {
-                    return nested;
-                }
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in element.EnumerateArray())
-            {
-                var nested = FindString(item, names);
-                if (!string.IsNullOrWhiteSpace(nested))
-                {
-                    return nested;
-                }
-            }
-        }
-
-        return null;
-    }
-
     private static IReadOnlyList<(string Id, string? Title)> ReadSessions(string json)
     {
         try
         {
-            using var document = JsonDocument.Parse(json);
+            using var document = JsonDocument.Parse(ExtractJson(json));
             var array = document.RootElement.ValueKind == JsonValueKind.Array
                 ? document.RootElement
                 : document.RootElement.TryGetProperty("sessions", out var sessions) ? sessions : default;
@@ -241,8 +239,8 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
             var result = new List<(string Id, string? Title)>();
             foreach (var item in array.EnumerateArray())
             {
-                var id = FindString(item, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "id", "sessionId", "sessionID", "session_id" });
-                var title = FindString(item, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "title" });
+                var id = JsonElementReader.FindString(item, "id", "sessionId", "sessionID", "session_id");
+                var title = JsonElementReader.FindString(item, "title");
                 if (!string.IsNullOrWhiteSpace(id))
                 {
                     result.Add((id, title));
@@ -290,5 +288,25 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
     {
         var invalid = Path.GetInvalidFileNameChars();
         return new string(value.Select(character => invalid.Contains(character) ? '_' : character).ToArray());
+    }
+
+    private static string ExtractJson(string text)
+    {
+        var trimmed = text.Trim();
+        if (trimmed.StartsWith('{') || trimmed.StartsWith('['))
+        {
+            return trimmed;
+        }
+
+        foreach (var line in text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Reverse())
+        {
+            var candidate = line.Trim();
+            if (candidate.StartsWith('{') || candidate.StartsWith('['))
+            {
+                return candidate;
+            }
+        }
+
+        return trimmed;
     }
 }

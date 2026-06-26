@@ -6,6 +6,7 @@ using OpenCodeQueue.Core.OpenCode;
 using OpenCodeQueue.Core.Ports;
 using OpenCodeQueue.Core.State;
 using OpenCodeQueue.Infrastructure.Files;
+using OpenCodeQueue.Infrastructure.Json;
 
 namespace OpenCodeQueue.Infrastructure.OpenCode;
 
@@ -62,7 +63,7 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         await SaveConnectionStateAsync(project, serverUrl, settings.ManageOpenCodeServer, cancellationToken);
     }
 
-    public async Task<OpenCodeSession> CreateSessionAsync(ProjectProfile project, string title, CancellationToken cancellationToken)
+    public async Task<OpenCodeSession> StartSessionAsync(ProjectProfile project, string title, CancellationToken cancellationToken)
     {
         await EnsureReadyAsync(project, cancellationToken);
         using var document = await SendJsonAsync(project, HttpMethod.Post, "/session", new { title }, cancellationToken);
@@ -133,10 +134,14 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
             MessageId = recoveryId,
             SourcePath = step.SourcePath,
             Transport = PromptTransport.Inline,
+            RunId = manifest.RunId,
+            StepId = step.Id.Value,
             Content = "Консервативное восстановление OpenCodeQueue: проверь предыдущий незавершённый шаг в этой session. Если исходный prompt уже выполнен, кратко сообщи результат и не повторяй опасные действия. Если выполнение не начиналось или прервалось, продолжи его с учётом уже видимого контекста session."
         };
-        await SendPromptAsync(project, manifest.SessionId, recoveryPayload, cancellationToken);
-        return new StepRecoveryResult(StepRecoveryOutcome.ConservativeContinueSent, "Отправлен ConservativeContinue recovery prompt; исходный prompt повторно не отправлялся.");
+        var result = await SendPromptAsync(project, manifest.SessionId, recoveryPayload, cancellationToken);
+        return result.IsSuccess
+            ? new StepRecoveryResult(StepRecoveryOutcome.ConservativeContinueSent, "Отправлен ConservativeContinue recovery prompt; исходный prompt повторно не отправлялся.")
+            : new StepRecoveryResult(StepRecoveryOutcome.Failed, result.ErrorMessage ?? "Не удалось отправить recovery prompt.");
     }
 
     public async Task AbortSessionAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
@@ -364,7 +369,9 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
             return false;
         }
 
-        error = errorElement.TryGetProperty("data", out var data) ? ReadString(data, "message") : errorElement.ToString();
+        error = errorElement.TryGetProperty("data", out var data)
+            ? ReadString(data, "message")
+            : ReadString(errorElement, "message") ?? errorElement.ToString();
         return true;
     }
 
@@ -385,7 +392,7 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
 
     private static string? ReadString(JsonElement element, string propertyName)
     {
-        return element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        return JsonElementReader.ReadString(element, propertyName);
     }
 
     private static string NormalizeServerUrl(string serverUrl)

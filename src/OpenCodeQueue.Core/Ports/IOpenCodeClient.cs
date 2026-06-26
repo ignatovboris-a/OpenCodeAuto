@@ -8,7 +8,7 @@ public interface IOpenCodeClient
 {
     Task EnsureReadyAsync(ProjectProfile project, CancellationToken cancellationToken);
 
-    Task<OpenCodeSession> CreateSessionAsync(ProjectProfile project, string title, CancellationToken cancellationToken);
+    Task<OpenCodeSession> StartSessionAsync(ProjectProfile project, string title, CancellationToken cancellationToken);
 
     Task<OpenCodeSessionDetails> GetSessionAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken);
 

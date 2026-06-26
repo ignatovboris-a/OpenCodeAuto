@@ -1,6 +1,8 @@
 using OpenCodeQueue.Core.Configuration;
 using OpenCodeQueue.Core.Ports;
 using OpenCodeQueue.Core.Prompts;
+using OpenCodeQueue.Core.Workflow;
+using OpenCodeQueue.Infrastructure;
 
 namespace OpenCodeQueue.Cli.ConsoleUi;
 
@@ -10,8 +12,11 @@ public sealed class InteractiveMenu(
     IPromptRepository promptRepository,
     IProjectDiscoveryService projectDiscoveryService,
     IAppConfigStore configStore,
+    IStateStore stateStore,
+    IQueueUseCases queueUseCases,
     ProjectProfilePrompt projectProfilePrompt,
-    ProjectConsolePresenter projectPresenter)
+    ProjectConsolePresenter projectPresenter,
+    OperationResultPrinter operationResultPrinter)
 {
     public async Task<int> RunAsync(string configPath, CancellationToken cancellationToken)
     {
@@ -21,13 +26,21 @@ public sealed class InteractiveMenu(
         {
             var activeProject = await projectRegistry.GetActiveAsync(configPath, cancellationToken);
             var discovery = activeProject is null ? new PromptDiscoveryResult([], [], []) : await promptRepository.DiscoverAsync(activeProject, cancellationToken);
+            var state = activeProject is null ? null : await stateStore.LoadQueueStateAsync(activeProject, cancellationToken);
+            var hasActiveRun = !string.IsNullOrWhiteSpace(state?.ActiveRunId);
 
             reporter.Info("");
             reporter.Info("OpenCodeQueue");
             reporter.Info(activeProject is null ? "Активный проект: не выбран" : $"Активный проект: {activeProject.DisplayName ?? activeProject.Id.Value}");
             reporter.Info(activeProject is null ? "Путь проекта: не выбран" : $"Путь проекта: {activeProject.ProjectDir}");
+            if (activeProject is not null)
+            {
+                reporter.Info($"promptsDir: {ProjectPaths.PromptsDir(activeProject)}");
+                reporter.Info($"qualityDir: {ProjectPaths.QualityDir(activeProject)}");
+                reporter.Info($"stateDir: {ProjectPaths.StateDir(activeProject)}");
+            }
             reporter.Info(activeProject is null ? "Очередь задач: проект не выбран" : $"Очередь задач: prompts = {discovery.TaskPrompts.Count}, quality = {discovery.QualityPrompts.Count}");
-            reporter.Info("Активный run: нет");
+            reporter.Info(hasActiveRun ? $"Активный run: {state!.ActiveRunId}" : "Активный run: нет");
             reporter.Info("");
             reporter.Info("1. Запустить очередь до конца");
             reporter.Info("2. Запустить одну следующую задачу");
@@ -44,16 +57,16 @@ public sealed class InteractiveMenu(
             switch (choice)
             {
                 case "1":
-                    await ShowRunMessageAsync(activeProject, discovery.TaskPrompts.Count, false);
+                    await RunQueueFromMenuAsync(configPath, activeProject, hasActiveRun, false, cancellationToken);
                     break;
                 case "2":
-                    await ShowRunMessageAsync(activeProject, discovery.TaskPrompts.Count, true);
+                    await RunQueueFromMenuAsync(configPath, activeProject, hasActiveRun, true, cancellationToken);
                     break;
                 case "3":
-                    reporter.Warning("Восстановление run пока не реализовано.");
+                    operationResultPrinter.Print(await queueUseCases.ResumeAsync(configPath, activeProject?.Id.Value, cancellationToken));
                     break;
                 case "4":
-                    ShowStatus(activeProject, discovery.TaskPrompts.Count, discovery.QualityPrompts.Count);
+                    await ShowStatusAsync(configPath, activeProject, cancellationToken);
                     break;
                 case "5":
                     ShowPromptList(activeProject, discovery);
@@ -72,14 +85,14 @@ public sealed class InteractiveMenu(
                     break;
                 case "0":
                     reporter.Info("Выход.");
-                    return 0;
+                    return QueueExitCodes.Success;
                 default:
                     reporter.Warning("Неизвестный пункт меню.");
                     break;
             }
         }
 
-        return 130;
+        return QueueExitCodes.Cancelled;
     }
 
     private async Task EnsureProjectSelectedAsync(string configPath, CancellationToken cancellationToken)
@@ -202,25 +215,25 @@ public sealed class InteractiveMenu(
         projectPresenter.PrintDiscoveredProjects(discovered);
     }
 
-    private Task ShowRunMessageAsync(ProjectProfile? project, int taskCount, bool once)
+    private async Task RunQueueFromMenuAsync(string configPath, ProjectProfile? project, bool hasActiveRun, bool once, CancellationToken cancellationToken)
     {
         if (project is null)
         {
             reporter.Warning("Активный проект не выбран. Доступны выбор проекта, добавление проекта, диагностика и выход.");
-        }
-        else if (taskCount == 0)
-        {
-            reporter.Warning("Очередь задач пуста.");
-        }
-        else
-        {
-            reporter.Info($"Запуск {(once ? "одной следующей задачи" : "очереди до конца")} для проекта '{project.Id}' будет выполнен через orchestration use case на следующем шаге.");
+            return;
         }
 
-        return Task.CompletedTask;
+        if (hasActiveRun)
+        {
+            reporter.Warning("Новый запуск заблокирован: есть active run. Используйте восстановление, статус или abort.");
+            return;
+        }
+
+        var result = await queueUseCases.RunQueueAsync(configPath, project.Id.Value, once, cancellationToken);
+        operationResultPrinter.Print(result);
     }
 
-    private void ShowStatus(ProjectProfile? project, int taskCount, int qualityCount)
+    private async Task ShowStatusAsync(string configPath, ProjectProfile? project, CancellationToken cancellationToken)
     {
         if (project is null)
         {
@@ -228,7 +241,13 @@ public sealed class InteractiveMenu(
             return;
         }
 
-        projectPresenter.PrintStatus(project, taskCount, qualityCount);
+        var result = await queueUseCases.GetStatusAsync(configPath, project.Id.Value, cancellationToken);
+        if (result.Project is not null && result.Discovery is not null)
+        {
+            projectPresenter.PrintStatus(result.Project, result.Discovery, result.State, result.Manifest);
+        }
+
+        operationResultPrinter.Print(result);
     }
 
     private void ShowPromptList(ProjectProfile? project, PromptDiscoveryResult discovery)

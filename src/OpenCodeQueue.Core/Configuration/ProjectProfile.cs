@@ -18,10 +18,6 @@ public sealed record ProjectProfile
 
     public string CompletedDir { get; init; } = string.Empty;
 
-    public string FailedDir { get; init; } = string.Empty;
-
-    public bool ArchiveCompletedTaskPrompt { get; init; } = true;
-
     public bool StopOnQualityFailure { get; init; } = true;
 
     public OpenCodeSettings OpenCodeOverrides { get; init; } = new();

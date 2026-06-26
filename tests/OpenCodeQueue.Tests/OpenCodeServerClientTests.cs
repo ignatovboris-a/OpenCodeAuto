@@ -107,20 +107,28 @@ public sealed class OpenCodeServerClientTests
     }
 
     [Fact]
-    public async Task CreateSessionAsync_UsesServerApiAndReturnsSessionId()
+    public async Task StartSessionAsync_CreatesSessionWithoutSendingPrompt()
     {
         var root = NewProjectDir();
         var project = ExternalProject(root);
-        using var httpClient = new HttpClient(new FakeHandler(request => request.RequestUri!.AbsolutePath switch
+        using var httpClient = new HttpClient(new FakeHandler(async request =>
         {
-            "/global/health" => Json(new { healthy = true, version = "test" }),
-            "/path" => Json(new { worktree = root, directory = root }),
-            "/session" when request.Method == HttpMethod.Post => Json(new { id = "ses-1", directory = root, title = "run-1 project-a 01.md" }),
-            _ => new HttpResponseMessage(HttpStatusCode.NotFound)
+            if (request.RequestUri!.AbsolutePath == "/session/ses-1/message")
+            {
+                return new HttpResponseMessage(HttpStatusCode.InternalServerError);
+            }
+
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/global/health" => Json(new { healthy = true, version = "test" }),
+                "/path" => Json(new { worktree = root, directory = root }),
+                "/session" when request.Method == HttpMethod.Post => Json(new { id = "ses-1", directory = root, title = "run-1 project-a 01.md" }),
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
+            };
         }));
         var client = new OpenCodeServerClient(httpClient, new FakeProcessFactory());
 
-        var session = await client.CreateSessionAsync(project, "run-1 project-a 01.md", CancellationToken.None);
+        var session = await client.StartSessionAsync(project, "run-1 project-a 01.md", CancellationToken.None);
 
         Assert.Equal("ses-1", session.SessionId);
         Assert.Equal(root, session.ProjectDir);
@@ -260,6 +268,38 @@ public sealed class OpenCodeServerClientTests
 
         Assert.Equal(StepRecoveryOutcome.ConservativeContinueSent, result.Outcome);
         Assert.True(recoverySent);
+    }
+
+    [Fact]
+    public async Task TryRecoverStepAsync_WhenRecoveryPromptFails_ReturnsFailed()
+    {
+        var root = NewProjectDir();
+        var project = ExternalProject(root);
+        using var httpClient = new HttpClient(new FakeHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/session/ses-1/message" && request.Method == HttpMethod.Post)
+            {
+                return Task.FromResult(Json(new { info = new { id = "msg-1-recover", error = new { message = "recovery failed" } } }));
+            }
+
+            return Task.FromResult(request.RequestUri!.AbsolutePath switch
+            {
+                "/global/health" => Json(new { healthy = true, version = "test" }),
+                "/path" => Json(new { worktree = root, directory = root }),
+                "/session/ses-1" => Json(new { id = "ses-1", directory = root, title = "test" }),
+                "/session/status" => Json(new Dictionary<string, object> { ["ses-1"] = new { type = "idle" } }),
+                "/session/ses-1/message" => Json(new object[] { new { info = new { id = "msg-1", role = "user", time = new { created = 1 } } } }),
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
+            });
+        }));
+        var client = new OpenCodeServerClient(httpClient, new FakeProcessFactory());
+        var manifest = new RunManifest { RunId = "run-1", ProjectId = project.Id, SessionId = "ses-1", ProjectDirSnapshot = root };
+        var step = new WorkflowStep { Id = WorkflowStepId.Task, Kind = PromptKind.Task, SourcePath = Path.Combine(root, "prompts", "01.md"), SessionMessageId = "msg-1" };
+
+        var result = await client.TryRecoverStepAsync(project, manifest, step, CancellationToken.None);
+
+        Assert.Equal(StepRecoveryOutcome.Failed, result.Outcome);
+        Assert.Contains("recovery failed", result.Message, StringComparison.Ordinal);
     }
 
     private static ProjectProfile ManagedProject(string root)

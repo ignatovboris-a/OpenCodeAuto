@@ -1,7 +1,9 @@
 using OpenCodeQueue.Cli.ConsoleUi;
 using OpenCodeQueue.Core.Configuration;
+using OpenCodeQueue.Core.OpenCode;
 using OpenCodeQueue.Core.Ports;
 using OpenCodeQueue.Core.State;
+using OpenCodeQueue.Core.Workflow;
 using OpenCodeQueue.Infrastructure;
 
 namespace OpenCodeQueue.Cli.Commands;
@@ -13,10 +15,13 @@ public sealed class CommandDispatcher(
     IPromptRepository promptRepository,
     IStateStore stateStore,
     IRunLock runLock,
-    IClock clock,
+    IOpenCodeClient openCodeClient,
+    IQueueUseCases queueUseCases,
     IProjectDiscoveryService projectDiscoveryService,
     ProjectProfilePrompt projectProfilePrompt,
     ProjectConsolePresenter projectPresenter,
+    OperationResultPrinter operationResultPrinter,
+    ProjectDiagnosticsValidator diagnosticsValidator,
     InteractiveMenu interactiveMenu)
 {
     public async Task<int> DispatchAsync(CliCommand command, CancellationToken cancellationToken)
@@ -24,7 +29,7 @@ public sealed class CommandDispatcher(
         if (command.HelpRequested || string.Equals(command.Name, "help", StringComparison.OrdinalIgnoreCase))
         {
             PrintHelp();
-            return 0;
+            return QueueExitCodes.Success;
         }
 
         return command.Name.ToLowerInvariant() switch
@@ -59,189 +64,47 @@ public sealed class CommandDispatcher(
 
     private async Task<int> RunAsync(CliCommand command, CancellationToken cancellationToken)
     {
-        var project = await ResolveProjectAsync(command, cancellationToken);
-        if (project is null)
-        {
-            reporter.Warning("Проект не выбран. Используйте меню или команду project select/add.");
-            return 2;
-        }
-
-        if (!await EnsureNoActiveRunAsync(project, cancellationToken))
-        {
-            return 2;
-        }
-
-        await using var acquiredLock = await AcquireRunLockOrReportAsync(project, cancellationToken);
-        if (acquiredLock is null)
-        {
-            return 2;
-        }
-
-        var discovery = await promptRepository.DiscoverAsync(project, cancellationToken);
-
-        if (discovery.TaskPrompts.Count == 0)
-        {
-            reporter.Warning("Очередь задач пуста.");
-            return 0;
-        }
-
-        reporter.Info($"Очередь для проекта '{project.Id}' будет запущена из: {project.ProjectDir}");
-        reporter.Info(command.Once ? "Режим: одна задача." : "Режим: вся очередь.");
-        reporter.Warning("Логика оркестрации очереди ещё не реализована на этом шаге.");
-        return 0;
+        var result = await queueUseCases.RunQueueAsync(command.ConfigPath, command.ProjectId, command.Once, cancellationToken);
+        return operationResultPrinter.Print(result);
     }
 
     private async Task<int> StatusAsync(CliCommand command, CancellationToken cancellationToken)
     {
-        var project = await ResolveProjectAsync(command, cancellationToken);
-        if (project is null)
+        var result = await queueUseCases.GetStatusAsync(command.ConfigPath, command.ProjectId, cancellationToken);
+        if (result.Project is not null && result.Discovery is not null)
         {
-            reporter.Warning("Активный проект не выбран.");
-            return 2;
+            projectPresenter.PrintStatus(result.Project, result.Discovery, result.State, result.Manifest);
         }
 
-        try
-        {
-            var discovery = await promptRepository.DiscoverAsync(project, cancellationToken);
-            projectPresenter.PrintStatus(project, discovery.TaskPrompts.Count, discovery.QualityPrompts.Count);
-            await PrintStateStatusAsync(project, cancellationToken);
-        }
-        catch (InvalidOperationException exception)
-        {
-            reporter.Warning(exception.Message);
-            return 2;
-        }
-
-        return 0;
+        return operationResultPrinter.Print(result);
     }
 
     private async Task<int> ResumeAsync(CliCommand command, CancellationToken cancellationToken)
     {
-        var project = await ResolveProjectAsync(command, cancellationToken);
-        if (project is null)
-        {
-            reporter.Warning("Активный проект не выбран.");
-            return 2;
-        }
-
-        await using var acquiredLock = await AcquireRunLockOrReportAsync(project, cancellationToken);
-        if (acquiredLock is null)
-        {
-            return 2;
-        }
-
-        try
-        {
-            var state = await stateStore.LoadQueueStateAsync(project, cancellationToken);
-            if (string.IsNullOrWhiteSpace(state?.ActiveRunId))
-            {
-                reporter.Info("В выбранном проекте нет активного run для восстановления.");
-                return 0;
-            }
-
-            var now = clock.Now;
-            var manifest = await stateStore.LoadRunManifestAsync(project, state.ActiveRunId, cancellationToken);
-            if (manifest is null)
-            {
-                var manual = new RunManifest
-                {
-                    RunId = state.ActiveRunId,
-                    ProjectId = project.Id,
-                    ProjectDirSnapshot = project.ProjectDir,
-                    Status = RunStatus.NeedsManualIntervention,
-                    LastError = "manifest.json отсутствует",
-                    CreatedAt = now,
-                    StartedAt = now,
-                    UpdatedAt = now
-                };
-                await stateStore.SaveRunManifestAsync(project, manual, cancellationToken);
-                await MarkNeedsManualInterventionAsync(project, state.ActiveRunId, "manifest.json отсутствует", cancellationToken);
-                reporter.Warning($"manifest.json для activeRunId '{state.ActiveRunId}' отсутствует. Не запускайте новую задачу; проверьте папку runs вручную.");
-                return 2;
-            }
-
-            await stateStore.AppendEventAsync(project, NewEvent(QueueEventTypes.RecoveryStarted, project, manifest.RunId, manifest.CurrentStepIndex < manifest.Steps.Count ? manifest.Steps[manifest.CurrentStepIndex].Id.Value : null, manifest.SessionId, null, null), cancellationToken);
-            var recovered = manifest with
-            {
-                Status = manifest.Status == RunStatus.CompletedPendingArchive ? RunStatus.CompletedPendingArchive : RunStatus.Running,
-                RecoveryAttempts = manifest.RecoveryAttempts + 1,
-                UpdatedAt = clock.Now
-            };
-            await stateStore.SaveRunManifestAsync(project, recovered, cancellationToken);
-            await stateStore.AppendEventAsync(project, NewEvent(QueueEventTypes.RecoveryCompleted, project, recovered.RunId, null, recovered.SessionId, null, "ConservativeContinue: продолжайте предыдущий шаг в той же session"), cancellationToken);
-
-            if (recovered.Status == RunStatus.CompletedPendingArchive)
-            {
-                reporter.Info("Run находится в CompletedPendingArchive. При продолжении нужно завершить архивирование task prompt, prompts повторно не отправляются.");
-            }
-            else
-            {
-                reporter.Warning("Консервативное восстановление: новая задача не выбирается. Продолжайте активный шаг в той же OpenCode session; если нельзя доказать завершение, отправьте recovery prompt в эту session.");
-            }
-
-            await PrintManifestAsync(project, recovered);
-            return 0;
-        }
-        catch (InvalidOperationException exception)
-        {
-            reporter.Warning(exception.Message);
-            return 2;
-        }
+        var result = await queueUseCases.ResumeAsync(command.ConfigPath, command.ProjectId, cancellationToken);
+        return operationResultPrinter.Print(result);
     }
 
     private async Task<int> AbortAsync(CliCommand command, CancellationToken cancellationToken)
     {
-        var project = await ResolveProjectAsync(command, cancellationToken);
-        if (project is null)
-        {
-            reporter.Warning("Активный проект не выбран.");
-            return 2;
-        }
-
         if (!reporter.Confirm("Перевести active run в Aborted без удаления данных? [y/N]: "))
         {
             reporter.Warning("Abort отменён.");
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
-
-        await using var acquiredLock = await AcquireRunLockOrReportAsync(project, cancellationToken);
-        if (acquiredLock is null)
-        {
-            return 2;
-        }
-
-        var state = await stateStore.LoadQueueStateAsync(project, cancellationToken);
-        if (string.IsNullOrWhiteSpace(state?.ActiveRunId))
-        {
-            reporter.Info("В выбранном проекте нет активного run.");
-            return 0;
-        }
-
-        var manifest = await stateStore.LoadRunManifestAsync(project, state.ActiveRunId, cancellationToken);
-        var now = clock.Now;
-        if (manifest is not null)
-        {
-            await stateStore.SaveRunManifestAsync(project, manifest with { Status = RunStatus.Aborted, UpdatedAt = now, FinishedAt = now }, cancellationToken);
-        }
-
-        await stateStore.SaveQueueStateAsync(project, state with { ActiveRunId = null, UpdatedAt = now }, cancellationToken);
-        await stateStore.AppendEventAsync(project, NewEvent(QueueEventTypes.RunAborted, project, state.ActiveRunId, null, manifest?.SessionId, null, null), cancellationToken);
-        reporter.Info("Run переведён в Aborted. Данные сохранены, task prompt не архивирован автоматически.");
-        return 0;
+        var result = await queueUseCases.AbortRunAsync(command.ConfigPath, command.ProjectId, cancellationToken);
+        return operationResultPrinter.Print(result);
     }
 
     private async Task<int> ListPromptsAsync(CliCommand command, CancellationToken cancellationToken)
     {
-        var project = await ResolveProjectAsync(command, cancellationToken);
-        if (project is null)
+        var result = await queueUseCases.ListPromptsAsync(command.ConfigPath, command.ProjectId, cancellationToken);
+        if (result.Project is not null && result.Discovery is not null)
         {
-            reporter.Warning("Активный проект не выбран.");
-            return 2;
+            projectPresenter.PrintPromptList(result.Project, result.Discovery);
         }
 
-        var discovery = await promptRepository.DiscoverAsync(project, cancellationToken);
-        projectPresenter.PrintPromptList(project, discovery);
-        return 0;
+        return operationResultPrinter.Print(result);
     }
 
     private async Task<int> ValidateAsync(CliCommand command, CancellationToken cancellationToken)
@@ -250,7 +113,7 @@ public sealed class CommandDispatcher(
         if (!File.Exists(configPath))
         {
             reporter.Warning($"Файл конфигурации не найден: {configPath}");
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
         var config = await configStore.LoadAsync(configPath, cancellationToken);
@@ -260,7 +123,7 @@ public sealed class CommandDispatcher(
         if (config is null)
         {
             reporter.Warning("Файл конфигурации пуст или не может быть прочитан.");
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
         var errors = AppConfigValidator.Validate(config);
@@ -270,7 +133,10 @@ public sealed class CommandDispatcher(
             var project = await ResolveProjectAsync(command, cancellationToken);
             if (project is null)
             {
-                return 0;
+                reporter.Warning(string.IsNullOrWhiteSpace(command.ProjectId)
+                    ? "Активный проект не выбран. Укажите --project <id> или выполните project select."
+                    : $"Проект '{command.ProjectId}' не найден.");
+                return QueueExitCodes.ValidationError;
             }
 
             var discovery = await promptRepository.DiscoverAsync(project, cancellationToken);
@@ -279,7 +145,18 @@ public sealed class CommandDispatcher(
                 reporter.Warning(warning);
             }
 
-            return discovery.Warnings.Count == 0 ? 0 : 2;
+            var validation = diagnosticsValidator.Validate(project, discovery);
+            foreach (var error in validation.Errors)
+            {
+                reporter.Warning("- " + error);
+            }
+
+            foreach (var warning in validation.Warnings)
+            {
+                reporter.Warning("- " + warning);
+            }
+
+            return discovery.Warnings.Count == 0 && validation.Errors.Count == 0 ? QueueExitCodes.Success : QueueExitCodes.ValidationError;
         }
 
         reporter.Warning("Найдены ошибки конфигурации:");
@@ -288,7 +165,7 @@ public sealed class CommandDispatcher(
             reporter.Warning("- " + error);
         }
 
-        return 2;
+        return QueueExitCodes.ValidationError;
     }
 
     private async Task<int> ProjectListAsync(string configPath, CancellationToken cancellationToken)
@@ -297,7 +174,7 @@ public sealed class CommandDispatcher(
         if (projects.Count == 0)
         {
             reporter.Info("В registry пока нет проектов.");
-            return 0;
+            return QueueExitCodes.Success;
         }
 
         foreach (var project in projects)
@@ -305,7 +182,7 @@ public sealed class CommandDispatcher(
             reporter.Info($"{project.Id}: {project.ProjectDir}");
         }
 
-        return 0;
+        return QueueExitCodes.Success;
     }
 
     private async Task<int> ProjectCurrentAsync(string configPath, CancellationToken cancellationToken)
@@ -314,12 +191,12 @@ public sealed class CommandDispatcher(
         if (project is null)
         {
             reporter.Warning("Активный проект не выбран.");
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
         reporter.Info($"Активный проект: {project.Id}");
         reporter.Info(project.ProjectDir);
-        return 0;
+        return QueueExitCodes.Success;
     }
 
     private async Task<int> ProjectSelectAsync(string configPath, string? projectId, CancellationToken cancellationToken)
@@ -327,7 +204,7 @@ public sealed class CommandDispatcher(
         if (string.IsNullOrWhiteSpace(projectId))
         {
             reporter.Warning("Укажите id проекта: project select <id> --config opencode-queue.json");
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
         var result = await projectRegistry.SelectAsync(configPath, projectId, cancellationToken);
@@ -339,14 +216,14 @@ public sealed class CommandDispatcher(
         var project = projectProfilePrompt.ReadNewProject(askOpenCodeOverrides: true);
         if (project is null)
         {
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
         reporter.PrintProjectForConfirmation(project);
         if (!reporter.Confirm("Сохранить проект в config? [y/N]: "))
         {
             reporter.Warning("Проект не сохранён.");
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
         var result = await projectRegistry.AddOrUpdateAsync(configPath, project, cancellationToken);
@@ -358,7 +235,7 @@ public sealed class CommandDispatcher(
         if (string.IsNullOrWhiteSpace(projectId))
         {
             reporter.Warning("Укажите id проекта: project remove <id> --config opencode-queue.json");
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
         var active = await projectRegistry.GetActiveAsync(configPath, cancellationToken);
@@ -374,14 +251,14 @@ public sealed class CommandDispatcher(
         if (string.IsNullOrWhiteSpace(projectId))
         {
             reporter.Warning("Укажите id проекта: project update <id> --config opencode-queue.json");
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
         var current = await projectRegistry.GetByIdAsync(configPath, projectId.Trim(), cancellationToken);
         if (current is null)
         {
             reporter.Warning("Проект с таким id не найден.");
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
         var updated = projectProfilePrompt.ReadUpdatedProject(current);
@@ -389,7 +266,7 @@ public sealed class CommandDispatcher(
         if (!reporter.Confirm("Сохранить изменения проекта в config? [y/N]: "))
         {
             reporter.Warning("Проект не изменён.");
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
         var result = await projectRegistry.AddOrUpdateAsync(configPath, updated, cancellationToken);
@@ -402,12 +279,12 @@ public sealed class CommandDispatcher(
         if (discovered.Count == 0)
         {
             reporter.Info("Проекты не обнаружены. Ручной ввод пути доступен через project add.");
-            return 0;
+            return QueueExitCodes.Success;
         }
 
         projectPresenter.PrintDiscoveredProjects(discovered);
         reporter.Info("Ручной ввод пути доступен через project add.");
-        return 0;
+        return QueueExitCodes.Success;
     }
 
     private async Task<int> DoctorAsync(CliCommand command, CancellationToken cancellationToken)
@@ -416,10 +293,17 @@ public sealed class CommandDispatcher(
         if (project is null)
         {
             reporter.Warning("Активный проект не выбран.");
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
         reporter.Info($"Диагностика проекта: {project.Id}");
+        var validateCode = await ValidateAsync(command, cancellationToken);
+        if (validateCode != QueueExitCodes.Success)
+        {
+            reporter.Warning("Runtime-проверки OpenCode пропущены: сначала исправьте ошибки validate.");
+            return validateCode;
+        }
+
         projectPresenter.PrintDiagnostics(project);
         var existingLock = await runLock.ReadAsync(project, cancellationToken);
         if (existingLock is not null)
@@ -436,65 +320,45 @@ public sealed class CommandDispatcher(
         catch (InvalidOperationException exception)
         {
             reporter.Warning(exception.Message);
-            return 2;
+            return QueueExitCodes.ValidationError;
         }
 
-        return 0;
-    }
-
-    private async Task<bool> EnsureNoActiveRunAsync(ProjectProfile project, CancellationToken cancellationToken)
-    {
         try
         {
-            var state = await stateStore.LoadQueueStateAsync(project, cancellationToken);
-            if (!string.IsNullOrWhiteSpace(state?.ActiveRunId))
-            {
-                reporter.Warning($"В проекте уже есть active run: {state.ActiveRunId}. Новая задача не будет выбрана; используйте resume/status/abort.");
-                return false;
-            }
-
-            return true;
+            await openCodeClient.EnsureReadyAsync(project, cancellationToken);
+            reporter.Info("Runtime-проверка OpenCode: доступен, выбранный projectDir подтверждён.");
         }
-        catch (InvalidOperationException exception)
+        catch (OpenCodeProjectMismatchException exception)
         {
+            reporter.Warning("OpenCode server открыт для другого проекта. Очередь автоматически не запускается.");
             reporter.Warning(exception.Message);
-            return false;
+            return QueueExitCodes.OpenCodeUnavailableOrProjectMismatch;
         }
-    }
-
-    private async Task<IAsyncDisposable?> AcquireRunLockOrReportAsync(ProjectProfile project, CancellationToken cancellationToken)
-    {
-        var lockResult = await runLock.TryAcquireAsync(project, cancellationToken);
-        if (lockResult.Acquired)
+        catch (OpenCodeClientException exception)
         {
-            return lockResult.Releaser;
+            reporter.Warning("OpenCode недоступен: " + exception.Message);
+            return QueueExitCodes.OpenCodeUnavailableOrProjectMismatch;
         }
-
-        var existing = lockResult.ExistingLock;
-        if (existing?.IsStale == true)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
-            reporter.Warning($"Найден stale lock: pid={existing.Pid}, machine={existing.MachineName}, createdAt={existing.CreatedAt:u}.");
-            reporter.Warning("Lock не удалён автоматически. Проверьте, что runner не работает, затем выполните recovery/force unlock вручную.");
-        }
-        else
-        {
-            reporter.Warning(lockResult.Message ?? "Не удалось получить lock проекта.");
+            reporter.Warning("Runtime-проверка OpenCode не прошла: " + exception.Message);
+            return QueueExitCodes.OpenCodeUnavailableOrProjectMismatch;
         }
 
-        return null;
+        return validateCode == QueueExitCodes.Success ? QueueExitCodes.Success : validateCode;
     }
 
     private async Task PrintStateStatusAsync(ProjectProfile project, CancellationToken cancellationToken)
     {
         var state = await stateStore.LoadQueueStateAsync(project, cancellationToken);
-        reporter.Info($"State dir: {ProjectPaths.StateDir(project)}");
+        reporter.Info($"stateDir: {ProjectPaths.StateDir(project)}");
         if (state is null || string.IsNullOrWhiteSpace(state.ActiveRunId))
         {
-            reporter.Info("Active run: нет");
+            reporter.Info("активный run: нет");
             return;
         }
 
-        reporter.Info($"Active run: {state.ActiveRunId}");
+        reporter.Info($"активный run: {state.ActiveRunId}");
         var manifest = await stateStore.LoadRunManifestAsync(project, state.ActiveRunId, cancellationToken);
         if (manifest is null)
         {
@@ -502,50 +366,12 @@ public sealed class CommandDispatcher(
             return;
         }
 
-        await PrintManifestAsync(project, manifest);
+        PrintManifest(project, manifest);
     }
 
-    private Task PrintManifestAsync(ProjectProfile project, RunManifest manifest)
+    private void PrintManifest(ProjectProfile project, RunManifest manifest)
     {
-        reporter.Info($"Run status: {manifest.Status}");
-        reporter.Info($"Session id: {manifest.SessionId ?? "не создана"}");
-        reporter.Info($"Logs: {Path.Combine(ProjectPaths.RunDir(project, manifest.RunId), "logs")}");
-        if (manifest.CurrentStepIndex >= 0 && manifest.CurrentStepIndex < manifest.Steps.Count)
-        {
-            var step = manifest.Steps[manifest.CurrentStepIndex];
-            reporter.Info($"Current step: {step.Id} ({step.Status})");
-        }
-        else
-        {
-            reporter.Info("Current step: нет");
-        }
-
-        if (!string.IsNullOrWhiteSpace(manifest.LastError))
-        {
-            reporter.Warning("Последняя ошибка: " + manifest.LastError);
-        }
-
-        return Task.CompletedTask;
-    }
-
-    private async Task MarkNeedsManualInterventionAsync(ProjectProfile project, string runId, string reason, CancellationToken cancellationToken)
-    {
-        await stateStore.AppendEventAsync(project, NewEvent(QueueEventTypes.RecoveryStarted, project, runId, null, null, null, reason), cancellationToken);
-    }
-
-    private QueueEvent NewEvent(string type, ProjectProfile project, string? runId, string? stepId, string? sessionId, string? taskFile, string? message)
-    {
-        return new QueueEvent
-        {
-            Type = type,
-            ProjectId = project.Id,
-            RunId = runId,
-            StepId = stepId,
-            SessionId = sessionId,
-            TaskFile = taskFile,
-            Message = message,
-            CreatedAt = clock.Now
-        };
+        projectPresenter.PrintManifest(project, manifest);
     }
 
     private async Task<ProjectProfile?> ResolveProjectAsync(CliCommand command, CancellationToken cancellationToken)
@@ -566,18 +392,18 @@ public sealed class CommandDispatcher(
         if (isSuccess)
         {
             reporter.Info(message ?? "Готово.");
-            return 0;
+            return QueueExitCodes.Success;
         }
 
         reporter.Warning(message ?? "Операция не выполнена.");
-        return 2;
+        return QueueExitCodes.ValidationError;
     }
 
     private int Unknown(string? commandName)
     {
         reporter.Error($"Неизвестная команда: {commandName}");
         PrintHelp();
-        return 1;
+        return QueueExitCodes.UnexpectedError;
     }
 
     private void PrintHelp()

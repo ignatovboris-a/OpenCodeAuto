@@ -89,6 +89,28 @@ public sealed class JsonProjectRegistryTests
     }
 
     [Fact]
+    public async Task RemoveAsync_RemovesNonActiveProjectWithoutChangingActiveProjectId()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
+        var configPath = Path.Combine(root, "opencode-queue.json");
+        var projectADir = Path.Combine(root, "a");
+        var projectBDir = Path.Combine(root, "b");
+        Directory.CreateDirectory(projectADir);
+        Directory.CreateDirectory(projectBDir);
+        var registry = new JsonProjectRegistry(new JsonAppConfigStore());
+        await registry.AddOrUpdateAsync(configPath, new ProjectProfile { Id = "project-a", ProjectDir = projectADir }, CancellationToken.None);
+        await registry.AddOrUpdateAsync(configPath, new ProjectProfile { Id = "project-b", ProjectDir = projectBDir }, CancellationToken.None);
+        await registry.SelectAsync(configPath, "project-a", CancellationToken.None);
+
+        var result = await registry.RemoveAsync(configPath, "project-b", confirmedActiveRemoval: false, CancellationToken.None);
+        var config = await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("project-a", config!.ActiveProjectId!.Value.Value);
+        Assert.Equal("project-a", Assert.Single(config.Projects).Id.Value);
+    }
+
+    [Fact]
     public async Task RemoveAsync_ClearsActiveProjectIdWhenConfirmed()
     {
         var configPath = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"), "opencode-queue.json");

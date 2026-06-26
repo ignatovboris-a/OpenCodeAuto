@@ -44,6 +44,26 @@ public sealed class JsonStateStoreTests
     }
 
     [Fact]
+    public async Task SaveQueueStateAsync_UsesAtomicWriteAndLeavesNoTempFiles()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
+        var project = new ProjectProfile { Id = "project-a", ProjectDir = root };
+        var store = new JsonStateStore();
+
+        await store.SaveQueueStateAsync(project, new QueueState
+        {
+            ProjectId = "project-a",
+            ProjectDirSnapshot = root,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        }, CancellationToken.None);
+
+        var stateDir = Path.Combine(root, ".queue");
+        Assert.True(File.Exists(Path.Combine(stateDir, "state.json")));
+        Assert.Empty(Directory.EnumerateFiles(stateDir, "state.json.tmp.*"));
+    }
+
+    [Fact]
     public async Task LoadQueueStateAsync_RejectsProjectMismatch()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));

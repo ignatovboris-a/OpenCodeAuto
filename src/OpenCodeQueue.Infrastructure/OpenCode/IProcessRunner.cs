@@ -62,17 +62,26 @@ public sealed class DefaultProcessRunner : IProcessRunner
         {
             await process.WaitForExitAsync(linkedCts.Token);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            KillIfRunning(process);
+            throw;
+        }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts?.IsCancellationRequested == true)
         {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-
+            KillIfRunning(process);
             throw new TimeoutException($"Процесс OpenCode CLI превысил timeout: {request.Timeout}.");
         }
 
         return new ProcessRunResult(process.ExitCode, await stdout, await stderr);
+    }
+
+    private static void KillIfRunning(Process process)
+    {
+        if (!process.HasExited)
+        {
+            process.Kill(entireProcessTree: true);
+        }
     }
 
     private static async Task<string> ReadLinesAsync(StreamReader reader, Func<string, CancellationToken, Task>? onLine, CancellationToken cancellationToken)

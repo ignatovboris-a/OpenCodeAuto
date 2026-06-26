@@ -1,7 +1,7 @@
-using System.Security.Cryptography;
 using OpenCodeQueue.Core.Configuration;
 using OpenCodeQueue.Core.Ports;
 using OpenCodeQueue.Core.Prompts;
+using OpenCodeQueue.Infrastructure.Files;
 
 namespace OpenCodeQueue.Infrastructure.Prompts;
 
@@ -17,7 +17,12 @@ public sealed partial class FileSystemPromptRepository : IPromptRepository
 
     public Task<string> ReadPromptTextAsync(PromptDescriptor prompt, CancellationToken cancellationToken)
     {
-        return File.ReadAllTextAsync(prompt.Path, cancellationToken);
+        return ReadPromptTextAsync(prompt.Path, cancellationToken);
+    }
+
+    public Task<string> ReadPromptTextAsync(string promptPath, CancellationToken cancellationToken)
+    {
+        return File.ReadAllTextAsync(promptPath, cancellationToken);
     }
 
     private static async Task<IReadOnlyList<PromptDescriptor>> GetPromptsAsync(ProjectProfile project, PromptKind kind, List<string> warnings, CancellationToken cancellationToken)
@@ -91,7 +96,7 @@ public sealed partial class FileSystemPromptRepository : IPromptRepository
                     file.Path,
                     Path.GetFileName(file.Path),
                     file.Prefix,
-                    await ComputeSha256Async(file.Path, cancellationToken),
+                    await FileHash.ComputeSha256Async(file.Path, cancellationToken),
                     info.Length,
                     info.LastWriteTimeUtc,
                     kind));
@@ -114,13 +119,6 @@ public sealed partial class FileSystemPromptRepository : IPromptRepository
     }
 
     private static string KindTitle(PromptKind kind) => kind == PromptKind.Task ? "tasks" : "quality";
-
-    private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)
-    {
-        await using var stream = File.OpenRead(path);
-        var hash = await SHA256.HashDataAsync(stream, cancellationToken);
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
 
     private sealed record NumberedPromptFile(string Path, NumericPrefix Prefix);
 }

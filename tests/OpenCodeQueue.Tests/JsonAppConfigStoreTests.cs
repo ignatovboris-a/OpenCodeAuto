@@ -1,4 +1,5 @@
 using OpenCodeQueue.Core.Configuration;
+using OpenCodeQueue.Infrastructure;
 using OpenCodeQueue.Infrastructure.Configuration;
 
 namespace OpenCodeQueue.Tests;
@@ -58,7 +59,20 @@ public sealed class JsonAppConfigStoreTests
         Assert.Equal(Path.Combine(expectedProjectDir, "checks"), project.QualityDir);
         Assert.Equal(Path.Combine(expectedProjectDir, ".queue-state"), project.StateDir);
         Assert.Equal(Path.Combine(expectedProjectDir, ".queue-state", "completed"), project.CompletedDir);
-        Assert.Equal(Path.Combine(expectedProjectDir, ".queue-state", "failed"), project.FailedDir);
+    }
+
+    [Fact]
+    public void ProjectPaths_CompletedDirDefaultFollowsResolvedStateDir()
+    {
+        var root = CreateTempRoot();
+        var project = new ProjectProfile
+        {
+            Id = "project-a",
+            ProjectDir = root,
+            StateDir = "queue state"
+        };
+
+        Assert.Equal(Path.Combine(root, "queue state", "completed"), ProjectPaths.CompletedDir(project));
     }
 
     [Fact]
@@ -79,6 +93,7 @@ public sealed class JsonAppConfigStoreTests
         var project = (await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None))!.Projects.Single();
 
         Assert.Equal(Path.Combine(project.ProjectDir, "reviews"), project.QualityDir);
+        Assert.Null(project.ReviewsDir);
     }
 
     [Fact]
@@ -99,6 +114,7 @@ public sealed class JsonAppConfigStoreTests
         var project = (await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None))!.Projects.Single();
 
         Assert.Equal(Path.Combine(project.ProjectDir, "quality-checks"), project.QualityDir);
+        Assert.Null(project.ReviewsDir);
     }
 
     [Fact]

@@ -84,7 +84,6 @@ public sealed class JsonAppConfigStore(IClock? clock = null) : IAppConfigStore
             : project.QualityDir;
         var stateDir = string.IsNullOrWhiteSpace(project.StateDir) ? ".queue" : project.StateDir;
         var completedDir = string.IsNullOrWhiteSpace(project.CompletedDir) ? Path.Combine(stateDir, "completed") : project.CompletedDir;
-        var failedDir = string.IsNullOrWhiteSpace(project.FailedDir) ? Path.Combine(stateDir, "failed") : project.FailedDir;
 
         return project with
         {
@@ -92,9 +91,9 @@ public sealed class JsonAppConfigStore(IClock? clock = null) : IAppConfigStore
             ProjectDir = projectDir,
             PromptsDir = PathResolver.ResolveProjectPath(project.PromptsDir, projectDir),
             QualityDir = PathResolver.ResolveProjectPath(qualityDir, projectDir),
+            ReviewsDir = null,
             StateDir = PathResolver.ResolveProjectPath(stateDir, projectDir),
-            CompletedDir = PathResolver.ResolveProjectPath(completedDir, projectDir),
-            FailedDir = PathResolver.ResolveProjectPath(failedDir, projectDir)
+            CompletedDir = PathResolver.ResolveProjectPath(completedDir, projectDir)
         };
     }
 }

@@ -22,7 +22,9 @@ public static class ProjectPaths
 
     public static string RunManifestFile(ProjectProfile project, string runId) => Path.Combine(RunDir(project, runId), "manifest.json");
 
-    public static string CompletedDir(ProjectProfile project) => PathResolver.ResolveProjectPath(project.CompletedDir, project.ProjectDir, Path.Combine(project.StateDir, "completed"));
+    public static string CompletedDir(ProjectProfile project) => string.IsNullOrWhiteSpace(project.CompletedDir)
+        ? Path.Combine(StateDir(project), "completed")
+        : PathResolver.ResolveProjectPath(project.CompletedDir, project.ProjectDir);
 
-    public static string FailedDir(ProjectProfile project) => PathResolver.ResolveProjectPath(project.FailedDir, project.ProjectDir, Path.Combine(project.StateDir, "failed"));
+    public static bool AreSamePath(string left, string right) => PathResolver.AreSamePath(left, right);
 }

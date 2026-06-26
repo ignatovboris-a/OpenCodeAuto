@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using OpenCodeQueue.Core.Ports;
+using OpenCodeQueue.Core.Workflow;
 using OpenCodeQueue.Infrastructure.Configuration;
 using OpenCodeQueue.Infrastructure.Discovery;
 using OpenCodeQueue.Infrastructure.Files;
@@ -28,8 +29,10 @@ public static class DependencyInjection
         services.AddSingleton<IPromptRepository, FileSystemPromptRepository>();
         services.AddSingleton<IStateStore, JsonStateStore>();
         services.AddSingleton<IRunLock, FileRunLock>();
+        services.AddSingleton<IRunWorkspace, RunWorkspace>();
         services.AddSingleton<IFileArchiver, FileSystemArchiver>();
         services.AddSingleton<IClock, SystemClock>();
+        services.AddSingleton<IQueueUseCases, QueueUseCases>();
         return services;
     }
 }

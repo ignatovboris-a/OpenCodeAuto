@@ -62,6 +62,30 @@ public sealed class OpenCodeCliClientTests
     }
 
     [Fact]
+    public async Task SendPromptAsync_DoesNotWriteFullPromptTextToLogFiles()
+    {
+        var root = NewProjectDir();
+        var prompt = "secret prompt body must stay out of logs";
+        var runner = new FakeProcessRunner(new ProcessRunResult(0, "{\"messageId\":\"msg-1\"}", string.Empty));
+        var client = new OpenCodeCliClient(runner);
+
+        await client.SendPromptAsync(Project(root), "ses-1", new PromptPayload
+        {
+            Content = prompt,
+            SourcePath = Path.Combine(root, "prompts", "01.md"),
+            MessageId = "msg-1",
+            Transport = PromptTransport.Inline,
+            RunId = "run-1",
+            StepId = "task"
+        }, CancellationToken.None);
+
+        var stdout = await File.ReadAllTextAsync(Path.Combine(root, ".queue", "runs", "run-1", "logs", "task.stdout.log"));
+        var stderr = await File.ReadAllTextAsync(Path.Combine(root, ".queue", "runs", "run-1", "logs", "task.stderr.log"));
+        Assert.DoesNotContain(prompt, stdout);
+        Assert.DoesNotContain(prompt, stderr);
+    }
+
+    [Fact]
     public async Task SendPromptAsync_MissingSessionId_FailsWithoutContinue()
     {
         var root = NewProjectDir();
@@ -80,27 +104,24 @@ public sealed class OpenCodeCliClientTests
     }
 
     [Fact]
-    public async Task CreateSessionAsync_UsesTitleDirJsonAndReadsSessionId()
+    public async Task StartSessionAsync_UsesSessionCreateTitleDirAndJson()
     {
         var root = NewProjectDir();
         var runner = new FakeProcessRunner(new ProcessRunResult(0, "{\"sessionId\":\"ses-new\"}", string.Empty));
         var client = new OpenCodeCliClient(runner);
 
-        var session = await client.CreateSessionAsync(Project(root), "run-1 project-a 01.md", CancellationToken.None);
+        var session = await client.StartSessionAsync(Project(root), "run-1 project-a 01.md", CancellationToken.None);
 
         Assert.Equal("ses-new", session.SessionId);
         var request = Assert.Single(runner.Requests);
         Assert.Equal(root, request.WorkingDirectory);
-        Assert.Equal("run", request.Arguments[0]);
-        Assert.Equal("--dir", request.Arguments[1]);
-        Assert.Equal(root, request.Arguments[2]);
-        Assert.Contains("--title", request.Arguments);
-        Assert.Contains("--format", request.Arguments);
+        Assert.Equal(new[] { "session", "create", "--dir", root, "--title", "run-1 project-a 01.md", "--format", "json" }, request.Arguments);
+        Assert.DoesNotContain("--session", request.Arguments);
         Assert.DoesNotContain("--continue", request.Arguments);
     }
 
     [Fact]
-    public async Task CreateSessionAsync_WhenJsonHasNoSessionId_FindsUniqueSessionByTitle()
+    public async Task StartSessionAsync_WhenJsonHasNoSessionId_FindsUniqueSessionByTitle()
     {
         var root = NewProjectDir();
         var runner = new FakeProcessRunner(
@@ -108,14 +129,40 @@ public sealed class OpenCodeCliClientTests
             new ProcessRunResult(0, "[{\"id\":\"ses-found\",\"title\":\"run-2 project-a 02.md\"}]", string.Empty));
         var client = new OpenCodeCliClient(runner);
 
-        var session = await client.CreateSessionAsync(Project(root), "run-2 project-a 02.md", CancellationToken.None);
+        var session = await client.StartSessionAsync(Project(root), "run-2 project-a 02.md", CancellationToken.None);
 
         Assert.Equal("ses-found", session.SessionId);
-        Assert.Equal(new[] { "session", "list", "--format", "json" }, runner.Requests[1].Arguments);
+        Assert.Equal(new[] { "session", "list", "--dir", root, "--format", "json" }, runner.Requests[1].Arguments);
     }
 
     [Fact]
-    public async Task CreateSessionAsync_WhenSessionIdCannotBeFound_StopsSafely()
+    public async Task StartSessionAsync_ReadsGenericIdFromSessionCreate()
+    {
+        var root = NewProjectDir();
+        var runner = new FakeProcessRunner(new ProcessRunResult(0, "{\"id\":\"ses-created\"}", string.Empty));
+        var client = new OpenCodeCliClient(runner);
+
+        var session = await client.StartSessionAsync(Project(root), "run-generic-id", CancellationToken.None);
+
+        Assert.Equal("ses-created", session.SessionId);
+        Assert.Single(runner.Requests);
+    }
+
+    [Fact]
+    public async Task StartSessionAsync_ReadsSessionIdFromLastJsonLine()
+    {
+        var root = NewProjectDir();
+        var runner = new FakeProcessRunner(new ProcessRunResult(0, "progress\n{\"sessionId\":\"ses-noisy\"}", string.Empty));
+        var client = new OpenCodeCliClient(runner);
+
+        var session = await client.StartSessionAsync(Project(root), "run-noisy", CancellationToken.None);
+
+        Assert.Equal("ses-noisy", session.SessionId);
+        Assert.Single(runner.Requests);
+    }
+
+    [Fact]
+    public async Task StartSessionAsync_WhenSessionIdCannotBeFound_StopsSafely()
     {
         var root = NewProjectDir();
         var runner = new FakeProcessRunner(
@@ -123,9 +170,32 @@ public sealed class OpenCodeCliClientTests
             new ProcessRunResult(0, "[]", string.Empty));
         var client = new OpenCodeCliClient(runner);
 
-        var exception = await Assert.ThrowsAsync<OpenCodeClientException>(() => client.CreateSessionAsync(Project(root), "run-3", CancellationToken.None));
+        var exception = await Assert.ThrowsAsync<OpenCodeClientException>(() => client.StartSessionAsync(Project(root), "run-3", CancellationToken.None));
 
         Assert.Contains("Workflow остановлен безопасно", exception.Message);
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_FileAttachment_UsesFileAndSession()
+    {
+        var root = NewProjectDir();
+        var source = Path.Combine(root, "prompts", "01 big.md");
+        Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+        await File.WriteAllTextAsync(source, "original", CancellationToken.None);
+        var runner = new FakeProcessRunner(new ProcessRunResult(0, "{\"sessionId\":\"ses-new\"}", string.Empty));
+        var client = new OpenCodeCliClient(runner);
+
+        await client.SendPromptAsync(Project(root), "ses-new", new PromptPayload
+        {
+            Content = "large prompt text must not be inline",
+            SourcePath = source,
+            MessageId = "msg-task",
+            Transport = PromptTransport.FileAttachment
+        }, CancellationToken.None);
+
+        var request = Assert.Single(runner.Requests);
+        Assert.Equal(new[] { "run", "--dir", root, "--session", "ses-new", "--format", "json", "--file", source, "Выполни инструкции из прикреплённого Markdown-файла." }, request.Arguments);
+        Assert.DoesNotContain("large prompt text must not be inline", request.Arguments);
     }
 
     private static ProjectProfile Project(string root)
@@ -139,6 +209,16 @@ public sealed class OpenCodeCliClientTests
                 OpenCodeMode = OpenCodeMode.Cli,
                 OpenCodeExecutable = "opencode-test"
             }
+        };
+    }
+
+    private static PromptPayload Payload(string root)
+    {
+        return new PromptPayload
+        {
+            Content = "prompt",
+            SourcePath = Path.Combine(root, "prompts", "01.md"),
+            MessageId = "msg-task"
         };
     }
 
