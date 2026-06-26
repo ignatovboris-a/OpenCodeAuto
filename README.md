@@ -87,7 +87,7 @@ opencode-queue.json
   projects[]
 ```
 
-Канонический пример есть в `examples/opencode-queue.json`. Старый alias `examples/queue-app.example.json` оставлен как короткий demo config.
+Рабочий config проекта находится в корне repository: `opencode-queue.json`.
 
 Правила путей в текущей реализации:
 
@@ -391,25 +391,19 @@ Trade-offs:
 
 Для полностью автономного бинаря можно использовать `--self-contained true`, но размер publish output будет значительно больше.
 
-## Examples
+## Рабочая Структура Этого Репозитория
 
-В репозитории есть демонстрационные файлы:
+В корне репозитория используются рабочие файлы очереди:
 
 ```text
-examples/
-  opencode-queue.json
-  project-config.json
-  queue-app.example.json
-  queue-app.example.md
-  prompts/
-    01-example-task.md
-  quality/
-    01-self-check.md
-    02-architecture-risks.md
-    03-final-report.md
+opencode-queue.json
+prompts/
+quality/
+  01-проверка_реализации_без_совместимости.md
+  02_проблемы_архитектуры.md
 ```
 
-`opencode-queue.json` и `queue-app.example.json` являются валидными JSON без комментариев. `project-config.json` показывает один project profile как snippet для вставки в `projects[]`. Пояснения вынесены в `queue-app.example.md`.
+Демонстрационная папка удалена. Runtime config `opencode-queue.json` смотрит на корневые `prompts/` и `quality/`.
 
 Подробные recovery-инструкции есть в `docs/troubleshooting.md`.
 

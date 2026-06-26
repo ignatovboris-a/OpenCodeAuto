@@ -73,6 +73,55 @@ public sealed class InteractiveMenuTests
     }
 
     [Fact]
+    public async Task RunAsync_AddProject_CanSelectDiscoveredOpenCodeProjectByNumber()
+    {
+        var root = CreateTempRoot();
+        var configPath = Path.Combine(root, "opencode-queue.json");
+        var activeProject = await AddProjectAsync(configPath, root, "active-project");
+        await new JsonProjectRegistry(new JsonAppConfigStore()).SelectAsync(configPath, activeProject.Id.Value, CancellationToken.None);
+        var projectDir = Path.Combine(root, "OpenCode Project");
+        Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
+        Directory.CreateDirectory(Path.Combine(projectDir, "quality"));
+        Directory.CreateDirectory(Path.Combine(projectDir, ".queue"));
+        var discovery = new StaticDiscoveryService([
+            new DiscoveredProject("OpenCode Server API", "OpenCode Project", projectDir, "opencode-project", DiscoveryConfidence.High, [], true)
+        ]);
+        var reporter = new TestReporter(["7", "1", "", "", "", "", "y", "0"]);
+
+        var exitCode = await CreateMenu(reporter, discoveryService: discovery).RunAsync(configPath, CancellationToken.None);
+        var config = await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(config);
+        var project = config!.Projects.Single(project => project.ProjectDir == projectDir);
+        Assert.True(project.Id.IsValid);
+        Assert.Equal(projectDir, project.ProjectDir);
+        Assert.Equal("active-project", config.ActiveProjectId!.Value.Value);
+        Assert.Contains(reporter.Messages, message => message.Contains("Проекты, найденные через OpenCode", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RunAsync_AddProject_ZeroFromDiscoveredProjectsReturnsWithoutSaving()
+    {
+        var root = CreateTempRoot();
+        var configPath = Path.Combine(root, "opencode-queue.json");
+        var activeProject = await AddProjectAsync(configPath, root, "active-project");
+        await new JsonProjectRegistry(new JsonAppConfigStore()).SelectAsync(configPath, activeProject.Id.Value, CancellationToken.None);
+        var projectDir = Path.Combine(root, "project");
+        Directory.CreateDirectory(projectDir);
+        var discovery = new StaticDiscoveryService([
+            new DiscoveredProject("OpenCode Server API", "Project", projectDir, "project", DiscoveryConfidence.High, [], true)
+        ]);
+        var reporter = new TestReporter(["7", "0", "0"]);
+
+        await CreateMenu(reporter, discoveryService: discovery).RunAsync(configPath, CancellationToken.None);
+        var config = await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None);
+
+        Assert.Single(config!.Projects);
+        Assert.Contains(reporter.Messages, message => message.Contains("Добавление проекта отменено", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task RunAsync_WhenFolderCreationRejected_SavesChosenPathsWithoutCreatingFolders()
     {
         var root = CreateTempRoot();
@@ -116,6 +165,50 @@ public sealed class InteractiveMenuTests
     }
 
     [Fact]
+    public async Task RunAsync_SelectProject_CanSelectOpenCodeDiscoveredProjectByNumber()
+    {
+        var root = CreateTempRoot();
+        var configPath = Path.Combine(root, "opencode-queue.json");
+        var activeProject = await AddProjectAsync(configPath, root, "active-project");
+        await new JsonProjectRegistry(new JsonAppConfigStore()).SelectAsync(configPath, activeProject.Id.Value, CancellationToken.None);
+        var discoveredDir = Path.Combine(root, "mcpproject");
+        Directory.CreateDirectory(discoveredDir);
+        var discovery = new StaticDiscoveryService([
+            new DiscoveredProject("OpenCode Server API", "mcpproject", discoveredDir, "mcpproject", DiscoveryConfidence.High, [], true)
+        ]);
+        var useCases = new FakeQueueUseCases();
+        var reporter = new TestReporter(["6", "2", "4", "0"]);
+
+        await CreateMenu(reporter, useCases, discovery).RunAsync(configPath, CancellationToken.None);
+        var config = await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None);
+
+        Assert.NotNull(config);
+        var project = config!.Projects.Single(project => project.ProjectDir == discoveredDir);
+        Assert.Equal(project.Id.Value, config.ActiveProjectId!.Value.Value);
+        Assert.Equal(project.Id.Value, useCases.StatusProjectIds.Single());
+        Assert.True(Directory.Exists(Path.Combine(discoveredDir, "prompts")));
+        Assert.True(Directory.Exists(Path.Combine(discoveredDir, "quality")));
+    }
+
+    [Fact]
+    public async Task RunAsync_SelectProject_DoesNotDuplicateRegistryProjectFromDiscovery()
+    {
+        var root = CreateTempRoot();
+        var configPath = Path.Combine(root, "opencode-queue.json");
+        var activeProject = await AddProjectAsync(configPath, root, "active-project");
+        await new JsonProjectRegistry(new JsonAppConfigStore()).SelectAsync(configPath, activeProject.Id.Value, CancellationToken.None);
+        var discovery = new StaticDiscoveryService([
+            new DiscoveredProject("OpenCode Server API", "active-project", activeProject.ProjectDir, "active-project", DiscoveryConfidence.High, [], true)
+        ]);
+        var reporter = new TestReporter(["6", "0", "0"]);
+
+        await CreateMenu(reporter, discoveryService: discovery).RunAsync(configPath, CancellationToken.None);
+
+        Assert.DoesNotContain(reporter.Messages, message => message.Contains("OpenCode", StringComparison.Ordinal) && message.StartsWith("2.", StringComparison.Ordinal));
+    }
+
+
+    [Fact]
     public async Task RunAsync_WhenActiveRunExists_BlocksNewQueueRunFromMenu()
     {
         var root = CreateTempRoot();
@@ -139,7 +232,7 @@ public sealed class InteractiveMenuTests
         Assert.Contains(reporter.Messages, message => message.Contains("Новый запуск заблокирован", StringComparison.Ordinal));
     }
 
-    private static InteractiveMenu CreateMenu(TestReporter reporter, FakeQueueUseCases? queueUseCases = null)
+    private static InteractiveMenu CreateMenu(TestReporter reporter, FakeQueueUseCases? queueUseCases = null, IProjectDiscoveryService? discoveryService = null)
     {
         var configStore = new JsonAppConfigStore();
         var registry = new JsonProjectRegistry(configStore);
@@ -151,7 +244,7 @@ public sealed class InteractiveMenuTests
             reporter,
             registry,
             promptRepository,
-            new EmptyDiscoveryService(),
+            discoveryService ?? new EmptyDiscoveryService(),
             configStore,
             stateStore,
             queueUseCases,
@@ -192,6 +285,13 @@ public sealed class InteractiveMenuTests
         public Task<IReadOnlyList<DiscoveredProject>> DiscoverAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<DiscoveredProject>>([]);
 
         public Task<IReadOnlyList<DiscoveredProject>> DiscoverAsync(string configPath, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<DiscoveredProject>>([]);
+    }
+
+    private sealed class StaticDiscoveryService(IReadOnlyList<DiscoveredProject> projects) : IProjectDiscoveryService
+    {
+        public Task<IReadOnlyList<DiscoveredProject>> DiscoverAsync(CancellationToken cancellationToken) => Task.FromResult(projects);
+
+        public Task<IReadOnlyList<DiscoveredProject>> DiscoverAsync(string configPath, CancellationToken cancellationToken) => Task.FromResult(projects);
     }
 
     private sealed class FakeQueueUseCases : IQueueUseCases

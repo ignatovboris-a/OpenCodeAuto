@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "activeProjectId": "mcpproject",
+  "defaults": {
+    "openCodeMode": "Server",
+    "openCodeExecutable": "C:/Users/ittest/AppData/Local/OpenCode/opencode-cli.exe",
+    "serverUrl": "http://localhost:4097",
+    "manageOpenCodeServer": false,
+    "serverPassword": "qwerty1234",
+    "serverUsername": "opencode",
+    "model": null,
+    "agent": null,
+    "promptTransport": "Auto",
+    "maxInlinePromptChars": 24000,
+    "consoleVerbosity": "Normal",
+    "resilience": {
+      "enabled": true,
+      "stepTimeoutMinutes": 90,
+      "idleTimeoutMinutes": 20,
+      "maxContinuationAttemptsPerStep": 5,
+      "maxTransportRetriesPerAttempt": 3,
+      "retryDelaySeconds": 15,
+      "retryBackoffMultiplier": 2,
+      "stopAfterSameSignatureRepeats": 3,
+      "detectTerminatedText": true,
+      "recoverOnToolExecutionAborted": true,
+      "autoRespondToRecoverableQuestions": false,
+      "permissionPolicy": "Manual",
+      "continuationPrompt": null
+    }
+  },
+  "projects": [
+    {
+      "id": "opencode-auto",
+      "displayName": "OpenCodeAuto",
+      "projectDir": ".",
+      "promptsDir": "prompts",
+      "qualityDir": "quality",
+      "stateDir": ".queue",
+      "completedDir": ".queue/completed"
+    },
+    {
+      "id": "mcpproject",
+      "projectDir": "D:\\mcpproject",
+      "promptsDir": "D:\\mcpproject\\prompts",
+      "qualityDir": "D:\\mcpproject\\quality",
+      "stateDir": "D:\\mcpproject\\.queue",
+      "displayName": "mcpproject",
+      "reviewsDir": null,
+      "completedDir": "D:\\mcpproject\\.queue\\completed",
+      "stopOnQualityFailure": true,
+      "openCodeOverrides": {
+        "openCodeMode": "Server",
+        "openCodeExecutable": "C:/Users/ittest/AppData/Local/OpenCode/opencode-cli.exe",
+        "serverUrl": "http://localhost:4097",
+        "manageOpenCodeServer": false,
+        "serverPassword": "qwerty1234",
+        "serverUsername": "opencode",
+        "model": null,
+        "agent": null,
+        "promptTransport": "Auto",
+        "maxInlinePromptChars": 24000,
+        "consoleVerbosity": "Normal",
+        "resilience": {
+          "enabled": true,
+          "stepTimeoutMinutes": 90,
+          "idleTimeoutMinutes": 20,
+          "maxContinuationAttemptsPerStep": 5,
+          "maxTransportRetriesPerAttempt": 3,
+          "retryDelaySeconds": 15,
+          "retryBackoffMultiplier": 2,
+          "stopAfterSameSignatureRepeats": 3,
+          "detectTerminatedText": true,
+          "recoverOnToolExecutionAborted": true,
+          "autoRespondToRecoverableQuestions": false,
+          "permissionPolicy": "Manual",
+          "continuationPrompt": null
+        }
+      }
+    }
+  ]
+}

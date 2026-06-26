@@ -7,10 +7,9 @@
 
 ## Проверенные команды
 - `dotnet run --project "src/OpenCodeQueue.Cli" -- --help`: успешно, вывел фактический help без обращения к OpenCode.
-- `dotnet run --project "src/OpenCodeQueue.Cli" -- status --config "examples/queue-app.example.json"`: успешно, показал active project, 0 prompts, отсутствие active run; реальный OpenCode не запускался.
-- `dotnet run --project "src/OpenCodeQueue.Cli" -- list --config "examples/queue-app.example.json"`: успешно, показал пустую очередь и предупреждения о несуществующих demo папках.
-- `dotnet run --project "src/OpenCodeQueue.Cli" -- validate --config "examples/queue-app.example.json"`: config валиден, ожидаемые предупреждения о demo paths.
-- `dotnet run --project "src/OpenCodeQueue.Cli" -- validate --config "examples/opencode-queue.json"`: config валиден, ожидаемые предупреждения о demo paths.
+- `dotnet run --no-build --project "src/OpenCodeQueue.Cli" -- validate --config "opencode-queue.json"`: config валиден.
+- `dotnet run --no-build --project "src/OpenCodeQueue.Cli" -- list --config "opencode-queue.json"`: успешно, использует корневые `prompts/` и `quality/`.
+- `dotnet run --no-build --project "src/OpenCodeQueue.Cli" -- status --config "opencode-queue.json"`: успешно, показывает active project `OpenCodeAuto`.
 - `dotnet restore`: успешно.
 - `dotnet build`: успешно, 0 warnings, 0 errors; SDK вывел информационное `NETSDK1057` о preview .NET SDK.
 - `dotnet test`: успешно, 120 passed, 0 failed, 0 skipped.
@@ -28,10 +27,9 @@
 - Первый старт без config проверен по коду: меню сообщает, что конфигурация не найдена, предлагает выбрать проект из registry, добавить вручную, повторить discovery или выйти. Интерактивный запуск не выполнялся, чтобы не блокировать проверку.
 
 ## Проверка config/examples
-- Добавлен канонический `examples/opencode-queue.json` с managed server, external server и CLI fallback профилями.
-- Добавлен `examples/project-config.json` как snippet одного project profile для вставки в `projects[]`.
-- Существующий `examples/queue-app.example.json` оставлен как короткий demo config.
-- Примеры покрывают `resilience`, `permissionPolicy`, CLI fallback, continuation prompt, console verbosity и fixed runtime logging locations.
+- Рабочий config находится в корне: `opencode-queue.json`.
+- Runtime prompts находятся в корневых `prompts/` и `quality/`.
+- Config покрывает внешний OpenCode server `http://localhost:4097`, `resilience`, `permissionPolicy`, prompt transport и console verbosity.
 - Dangerous/permissive permissions по умолчанию не включены: `permissionPolicy` в примерах равен `Manual`, `autoRespondToRecoverableQuestions` равен `false`.
 - Отдельного `logging` config object в фактической модели нет; документация описывает реальные места логов: `.queue/events.jsonl`, manifest и `runs/<runId>/attempts/` для CLI adapter.
 
@@ -48,7 +46,7 @@
 - Документация объясняет, почему `terminated` не success, зачем continuation prompt, где смотреть logs/manifest и что делать при `NeedsManualIntervention`.
 
 ## Проверка permissions
-- Safe default: `PermissionPolicy.Manual` в code defaults и examples.
+- Safe default: `PermissionPolicy.Manual` в code defaults и runtime config.
 - `AutoApprove` существует как explicit opt-in, но не рекомендуется для unattended без отдельной проверки OpenCode/project policy.
 - Permission requests не маскируются как success и не включают dangerous permissions автоматически.
 
@@ -57,7 +55,7 @@
 - Добавлен `docs/troubleshooting.md` с recovery сценариями и manual intervention действиями.
 - `docs/audit/14-post-implementation-audit.md` и `docs/audit/15-remediation-report.md` присутствуют.
 - Создан этот отчёт: `docs/audit/16-final-verification-report.md`.
-- Examples присутствуют: `examples/opencode-queue.json`, `examples/project-config.json`, `examples/prompts/01-example-task.md`, `examples/quality/01-self-check.md`, `examples/quality/02-architecture-risks.md`.
+- Рабочие файлы присутствуют: `opencode-queue.json`, `prompts/`, `quality/01-проверка_реализации_без_совместимости.md`, `quality/02_проблемы_архитектуры.md`.
 - Поиск старых названий проекта после правки не нашёл совпадений в Markdown/C#/JSON/project files.
 
 ## Проверка tests
@@ -70,15 +68,13 @@
 ## Проверка лишних удалений
 - `git status --short` перед отчётом показывал изменённые файлы предыдущего remediation и новые docs/examples; удалений `D` не было.
 - `git diff --name-status` перед отчётом не показывал удалённых tracked файлов.
-- `git diff --stat` перед отчётом: 13 tracked files changed, 373 insertions, 21 deletions; untracked `docs/`, `examples/opencode-queue.json`, `examples/project-config.json` не входят в этот stat.
-- Случайных удалений docs, examples, tests, prompt files, config samples, project registry code, recovery/watchdog code не обнаружено.
+- `git diff --stat` перед отчётом: 13 tracked files changed, 373 insertions, 21 deletions; untracked `docs/` не входил в этот stat.
+- Случайных удалений docs, tests, prompt files, config, project registry code, recovery/watchdog code не обнаружено. Demo папка удалена как неиспользуемая после переноса runtime folders в корень.
 
 ## Изменения, внесённые этим prompt
-- Добавлен `examples/opencode-queue.json` как основной безопасный config example.
-- Добавлен `examples/project-config.json` как project profile snippet.
+- Рабочий config перенесён в корень как `opencode-queue.json`.
 - Добавлен `docs/troubleshooting.md`.
-- README обновлён, чтобы явно ссылаться на новые examples и troubleshooting.
-- `examples/queue-app.example.md` обновлён описанием config fields, logging locations и permission defaults.
+- README обновлён, чтобы ссылаться на корневые `prompts/` и `quality/`.
 - Из audit docs убраны буквальные старые названия проекта, чтобы финальный grep не находил случайных остатков.
 - Создан `docs/audit/16-final-verification-report.md`.
 

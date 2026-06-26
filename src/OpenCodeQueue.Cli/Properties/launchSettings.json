@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "OpenCodeQueue.Cli": {
+      "commandName": "Project",
+      "workingDirectory": "D:/OpenCodeAuto"
+    }
+  }
+}

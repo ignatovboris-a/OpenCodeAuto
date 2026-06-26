@@ -2,6 +2,8 @@ using OpenCodeQueue.Core.Configuration;
 using OpenCodeQueue.Core.Discovery;
 using OpenCodeQueue.Core.Ports;
 using OpenCodeQueue.Infrastructure.Json;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 
 namespace OpenCodeQueue.Infrastructure.Discovery;
@@ -11,9 +13,7 @@ public sealed class CompositeProjectDiscoveryService(IAppConfigStore configStore
     public Task<IReadOnlyList<DiscoveredProject>> DiscoverAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var result = new List<DiscoveredProject>();
-        AddStorageCandidates(result);
-        return Task.FromResult<IReadOnlyList<DiscoveredProject>>(result);
+        return Task.FromResult<IReadOnlyList<DiscoveredProject>>([]);
     }
 
     public async Task<IReadOnlyList<DiscoveredProject>> DiscoverAsync(string configPath, CancellationToken cancellationToken)
@@ -33,18 +33,26 @@ public sealed class CompositeProjectDiscoveryService(IAppConfigStore configStore
                 Directory.Exists(project.ProjectDir)));
         }
 
-        await AddServerCandidatesAsync(result, config.Defaults.ServerUrl, cancellationToken);
-        foreach (var serverUrl in config.Projects.Select(project => project.OpenCodeOverrides.ServerUrl).Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (var settings in CandidateServerSettings(config).DistinctBy(settings => settings.ServerUrl, StringComparer.OrdinalIgnoreCase))
         {
-            await AddServerCandidatesAsync(result, serverUrl, cancellationToken);
+            await AddServerCandidatesAsync(result, settings, cancellationToken);
         }
 
-        AddStorageCandidates(result);
         return result;
     }
 
-    private static async Task AddServerCandidatesAsync(List<DiscoveredProject> result, string? serverUrl, CancellationToken cancellationToken)
+    private static IEnumerable<OpenCodeSettings> CandidateServerSettings(AppConfig config)
     {
+        yield return config.Defaults;
+        foreach (var settings in config.Projects.Select(project => project.OpenCodeOverrides))
+        {
+            yield return settings;
+        }
+    }
+
+    private static async Task AddServerCandidatesAsync(List<DiscoveredProject> result, OpenCodeSettings settings, CancellationToken cancellationToken)
+    {
+        var serverUrl = settings.ServerUrl;
         if (string.IsNullOrWhiteSpace(serverUrl) || !Uri.TryCreate(serverUrl, UriKind.Absolute, out var baseUri))
         {
             return;
@@ -55,7 +63,9 @@ public sealed class CompositeProjectDiscoveryService(IAppConfigStore configStore
             using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
             foreach (var endpoint in new[] { "project", "projects" })
             {
-                using var response = await httpClient.GetAsync(new Uri(baseUri, endpoint), cancellationToken);
+                using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(baseUri, endpoint));
+                AddAuthorization(request, settings);
+                using var response = await httpClient.SendAsync(request, cancellationToken);
                 if (!response.IsSuccessStatusCode)
                 {
                     continue;
@@ -94,15 +104,23 @@ public sealed class CompositeProjectDiscoveryService(IAppConfigStore configStore
         }
 
         var rawProjectDir = ReadString(element, "projectDir") ?? ReadString(element, "path") ?? ReadString(element, "cwd") ?? ReadString(element, "root");
+        rawProjectDir ??= ReadString(element, "worktree");
         if (string.IsNullOrWhiteSpace(rawProjectDir) && AddWrappedProjectCandidates(result, element, serverUrl))
         {
             return;
         }
 
-        var projectDir = string.IsNullOrWhiteSpace(rawProjectDir) || !Path.IsPathFullyQualified(rawProjectDir)
-            ? null
-            : Path.GetFullPath(rawProjectDir);
-        var displayName = ReadString(element, "name") ?? ReadString(element, "displayName") ?? projectDir ?? serverUrl;
+        if (string.IsNullOrWhiteSpace(rawProjectDir) || rawProjectDir == "/" || !Path.IsPathFullyQualified(rawProjectDir))
+        {
+            return;
+        }
+
+        var projectDir = Path.GetFullPath(rawProjectDir);
+        var displayName = ReadString(element, "name")
+            ?? ReadString(element, "displayName")
+            ?? (projectDir is null ? null : Path.GetFileName(projectDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)))
+            ?? projectDir
+            ?? serverUrl;
         var warnings = new List<string>();
         var canSelect = !string.IsNullOrWhiteSpace(projectDir) && Directory.Exists(projectDir);
         if (!canSelect)
@@ -149,36 +167,14 @@ public sealed class CompositeProjectDiscoveryService(IAppConfigStore configStore
         return string.Join('-', new string(chars).Split('-', StringSplitOptions.RemoveEmptyEntries));
     }
 
-    private static void AddStorageCandidates(List<DiscoveredProject> result)
+    private static void AddAuthorization(HttpRequestMessage request, OpenCodeSettings settings)
     {
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        if (string.IsNullOrWhiteSpace(home))
+        if (string.IsNullOrWhiteSpace(settings.ServerPassword))
         {
             return;
         }
 
-        var candidates = new[]
-        {
-            Path.Combine(home, ".local", "share", "opencode"),
-            Path.Combine(home, ".config", "opencode"),
-            Path.Combine(home, "AppData", "Roaming", "opencode")
-        };
-
-        foreach (var storage in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            if (!Directory.Exists(storage))
-            {
-                continue;
-            }
-
-            result.Add(new DiscoveredProject(
-                "OpenCode local storage",
-                storage,
-                null,
-                null,
-                DiscoveryConfidence.Low,
-                ["Найден storage OpenCode, но абсолютный projectDir не восстановлен надёжно. Укажите путь вручную."],
-                false));
-        }
+        var raw = $"{settings.ServerUsername}:{settings.ServerPassword}";
+        request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(raw)));
     }
 }

@@ -50,7 +50,7 @@
 ## Low findings
 - В README строка с примером `0.1. auth.md` отличается от требуемого примера `0.1 task.md`, но поддерживаемый parser покрывает оба формата.
 - В консольных сообщениях встречаются technical terms `run`, `quality`, `promptsDir`, `session id`, `activeRunId`. Это допустимо по требованиям, но для полностью русскоязычного UX можно добавить пояснения.
-- `docs/` отсутствовала до этого аудита; основная документация находится в `README.md`, `ARCHITECTURE-NOTES.md` и `examples/`.
+- `docs/` отсутствовала до этого аудита; основная документация находилась в `README.md`, `ARCHITECTURE-NOTES.md` и demo examples.
 
 ## Архитектурные замечания
 - Архитектура чистая: `Core` содержит domain/config/workflow/ports, `Infrastructure` содержит file state, archiver, prompt repository, OpenCode server/CLI clients, DI, discovery, `Cli` содержит parsing/menu/console presentation.
@@ -71,14 +71,14 @@
 
 ## Документация
 - README хорошо описывает назначение, `prompts`, `quality`, `.queue`, первый старт, registry, active project, run/resume/status/list/doctor, session id, Server API vs CLI fallback, archive, recovery и troubleshooting basics.
-- Examples присутствуют: `examples/queue-app.example.json`, `examples/queue-app.example.md`, `examples/prompts/01-example-task.md`, `examples/quality/01-self-check.md`, `02-architecture-risks.md`, `03-final-report.md`.
+- На момент аудита demo examples присутствовали; позже runtime folders перенесены в корень проекта.
 - Поиск старых названий проекта в Markdown не нашёл случайных остатков.
 - Недостаточно документированы фактические ограничения permission requests/questions, busy/retry continuation и CLI fallback event-stream parsing.
 
 ## Проверка на лишние удаления
 - До создания этого отчёта `git status --short`, `git diff --stat`, `git diff --name-status` были пустыми.
 - `git diff --name-status HEAD~5..HEAD` показывает в основном добавление solution, source, tests, examples и README/ARCHITECTURE updates; удалённых файлов (`D`) в проверенном диапазоне не обнаружено.
-- Prompts/examples quality/docs/tests/config examples присутствуют. Случайных удалений не выявлено.
+- Prompts, quality, docs, tests и config присутствуют. Случайных удалений не выявлено.
 
 ## Рекомендованный remediation plan
 1. Добавить session readiness gate: перед continuation вызывать `GetSessionStatusAsync`, ждать `Idle`, распознавать `Busy`, `Retry`, timeout и переводить повторяющийся retry в `NeedsManualIntervention`.

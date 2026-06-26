@@ -1,4 +1,5 @@
 using OpenCodeQueue.Core.Configuration;
+using OpenCodeQueue.Core.Discovery;
 using OpenCodeQueue.Core.Ports;
 using OpenCodeQueue.Core.Prompts;
 using OpenCodeQueue.Core.Workflow;
@@ -147,25 +148,48 @@ public sealed class InteractiveMenu(
     private async Task SelectProjectAsync(string configPath, CancellationToken cancellationToken)
     {
         var projects = await projectRegistry.ListAsync(configPath, cancellationToken);
-        if (projects.Count == 0)
+        var discoveredProjects = await DiscoverSelectableProjectsNotInRegistryAsync(configPath, projects, cancellationToken);
+        var totalCount = projects.Count + discoveredProjects.Count;
+        if (totalCount == 0)
         {
-            reporter.Warning("В registry пока нет проектов. Добавьте проект через project add.");
+            reporter.Warning("OpenCode projects не найдены. Проверьте serverUrl/логин/пароль или добавьте проект вручную через пункт 7.");
             return;
         }
 
-        foreach (var project in projects)
+        var number = 1;
+        for (var index = 0; index < projects.Count; index++)
         {
-            reporter.Info($"{project.Id}: {project.DisplayName ?? project.Id.Value} ({project.ProjectDir})");
+            var project = projects[index];
+            reporter.Info($"{number}. {project.DisplayName ?? project.Id.Value} ({project.ProjectDir}) [{project.Id}] registry");
+            number++;
         }
 
-        var id = reporter.ReadLine("Введите id проекта: ");
-        if (string.IsNullOrWhiteSpace(id))
+        foreach (var project in discoveredProjects)
         {
-            reporter.Warning("Id проекта не указан.");
+            reporter.Info($"{number}. {project.DisplayName} ({project.ProjectDir}) OpenCode");
+            number++;
+        }
+        reporter.Info("0. Назад без выбора");
+
+        var selected = reporter.ReadLine("Выберите проект по номеру или введите id: ");
+        if (string.IsNullOrWhiteSpace(selected) || selected.Trim() == "0")
+        {
+            reporter.Info("Выбор проекта отменён.");
             return;
         }
 
-        var result = await projectRegistry.SelectAsync(configPath, id.Trim(), cancellationToken);
+        var id = selected.Trim();
+        if (int.TryParse(id, out var selectedNumber) && selectedNumber >= 1 && selectedNumber <= projects.Count)
+        {
+            id = projects[selectedNumber - 1].Id.Value;
+        }
+        else if (int.TryParse(id, out selectedNumber) && selectedNumber > projects.Count && selectedNumber <= totalCount)
+        {
+            await AddAndSelectDiscoveredProjectAsync(configPath, discoveredProjects[selectedNumber - projects.Count - 1], cancellationToken);
+            return;
+        }
+
+        var result = await projectRegistry.SelectAsync(configPath, id, cancellationToken);
         if (result.IsSuccess)
         {
             reporter.Info(result.Message ?? "Активный проект выбран.");
@@ -176,9 +200,61 @@ public sealed class InteractiveMenu(
         }
     }
 
+    private async Task<IReadOnlyList<DiscoveredProject>> DiscoverSelectableProjectsNotInRegistryAsync(string configPath, IReadOnlyList<ProjectProfile> registryProjects, CancellationToken cancellationToken)
+    {
+        var registryPaths = registryProjects.Select(project => project.ProjectDir).ToArray();
+        var discovered = await projectDiscoveryService.DiscoverAsync(configPath, cancellationToken);
+        return discovered
+            .Where(project => project.CanSelectDirectly && !string.IsNullOrWhiteSpace(project.ProjectDir))
+            .Where(project => registryPaths.All(path => !ProjectPaths.AreSamePath(path, project.ProjectDir!)))
+            .GroupBy(project => Path.GetFullPath(project.ProjectDir!), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderBy(project => project.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private async Task AddAndSelectDiscoveredProjectAsync(string configPath, DiscoveredProject discovered, CancellationToken cancellationToken)
+    {
+        var config = await configStore.LoadOrCreateDefaultAsync(configPath, cancellationToken);
+        var projectId = CreateUniqueProjectId(discovered, config.Projects);
+        var projectDir = Path.GetFullPath(discovered.ProjectDir!);
+        var project = new ProjectProfile
+        {
+            Id = projectId,
+            DisplayName = discovered.DisplayName,
+            ProjectDir = projectDir,
+            PromptsDir = Path.Combine(projectDir, "prompts"),
+            QualityDir = Path.Combine(projectDir, "quality"),
+            StateDir = Path.Combine(projectDir, ".queue"),
+            CompletedDir = Path.Combine(projectDir, ".queue", "completed"),
+            OpenCodeOverrides = config.Defaults
+        };
+
+        Directory.CreateDirectory(project.PromptsDir);
+        Directory.CreateDirectory(project.QualityDir!);
+        Directory.CreateDirectory(project.StateDir);
+
+        var addResult = await projectRegistry.AddOrUpdateAsync(configPath, project, cancellationToken);
+        if (!addResult.IsSuccess)
+        {
+            reporter.Warning(addResult.Message ?? "Проект не сохранён.");
+            return;
+        }
+
+        var selectResult = await projectRegistry.SelectAsync(configPath, project.Id.Value, cancellationToken);
+        if (selectResult.IsSuccess)
+        {
+            reporter.Info($"Активный проект выбран: {project.DisplayName ?? project.Id.Value}");
+        }
+        else
+        {
+            reporter.Warning(selectResult.Message ?? "Проект сохранён, но не выбран.");
+        }
+    }
+
     private async Task AddProjectAsync(string configPath, CancellationToken cancellationToken)
     {
-        var project = projectProfilePrompt.ReadNewProject(askOpenCodeOverrides: true);
+        var project = await ReadProjectFromOpenCodeOrManualAsync(configPath, cancellationToken);
         if (project is null)
         {
             return;
@@ -202,6 +278,55 @@ public sealed class InteractiveMenu(
         }
     }
 
+    private async Task<ProjectProfile?> ReadProjectFromOpenCodeOrManualAsync(string configPath, CancellationToken cancellationToken)
+    {
+        var discovered = await projectDiscoveryService.DiscoverAsync(configPath, cancellationToken);
+        var selectable = discovered
+            .Where(project => project.CanSelectDirectly && !string.IsNullOrWhiteSpace(project.ProjectDir))
+            .GroupBy(project => Path.GetFullPath(project.ProjectDir!), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderBy(project => project.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (selectable.Length == 0)
+        {
+            reporter.Info("OpenCode не вернул selectable проекты. Доступен ручной ввод.");
+            return projectProfilePrompt.ReadNewProject(askOpenCodeOverrides: true);
+        }
+
+        reporter.Info("Проекты, найденные через OpenCode:");
+        for (var index = 0; index < selectable.Length; index++)
+        {
+            var project = selectable[index];
+            reporter.Info($"{index + 1}. {project.DisplayName} ({project.ProjectDir})");
+        }
+        reporter.Info("m. Добавить проект вручную");
+        reporter.Info("0. Назад без выбора");
+
+        var choice = reporter.ReadLine("Выберите проект: ");
+        if (string.IsNullOrWhiteSpace(choice) || choice.Trim() == "0")
+        {
+            reporter.Info("Добавление проекта отменено.");
+            return null;
+        }
+
+        if (string.Equals(choice.Trim(), "m", StringComparison.OrdinalIgnoreCase))
+        {
+            return projectProfilePrompt.ReadNewProject(askOpenCodeOverrides: true);
+        }
+
+        if (!int.TryParse(choice.Trim(), out var number) || number < 1 || number > selectable.Length)
+        {
+            reporter.Warning("Неверный номер проекта.");
+            return null;
+        }
+
+        var selected = selectable[number - 1];
+        var config = await configStore.LoadOrCreateDefaultAsync(configPath, cancellationToken);
+        var projectId = CreateUniqueProjectId(selected, config.Projects);
+        return projectProfilePrompt.ReadDiscoveredProject(selected, projectId, config.Defaults);
+    }
+
     private async Task ShowDiscoveryAsync(string configPath, CancellationToken cancellationToken)
     {
         var discovered = await projectDiscoveryService.DiscoverAsync(configPath, cancellationToken);
@@ -213,6 +338,33 @@ public sealed class InteractiveMenu(
 
         reporter.Info("Обнаруженные кандидаты:");
         projectPresenter.PrintDiscoveredProjects(discovered);
+    }
+
+    private static string CreateUniqueProjectId(DiscoveredProject discovered, IReadOnlyList<ProjectProfile> existingProjects)
+    {
+        var baseId = Slug(Path.GetFileName(discovered.ProjectDir?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            ?? discovered.SuggestedId
+            ?? discovered.DisplayName);
+        if (string.IsNullOrWhiteSpace(baseId))
+        {
+            baseId = "project";
+        }
+
+        var candidate = baseId;
+        var suffix = 2;
+        while (existingProjects.Any(project => string.Equals(project.Id.Value, candidate, StringComparison.OrdinalIgnoreCase)))
+        {
+            candidate = $"{baseId}-{suffix}";
+            suffix++;
+        }
+
+        return candidate;
+    }
+
+    private static string Slug(string value)
+    {
+        var chars = value.ToLowerInvariant().Select(ch => ch is >= 'a' and <= 'z' || ch is >= '0' and <= '9' ? ch : '-').ToArray();
+        return string.Join('-', new string(chars).Split('-', StringSplitOptions.RemoveEmptyEntries));
     }
 
     private async Task RunQueueFromMenuAsync(string configPath, ProjectProfile? project, bool hasActiveRun, bool once, CancellationToken cancellationToken)

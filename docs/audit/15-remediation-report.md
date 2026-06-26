@@ -50,7 +50,7 @@
 
 ## Документация
 - README обновлён: описаны ожидание `Idle`, safe default permissions/questions, CLI JSON-line classification и исправлен пример numbered prompt.
-- `examples/queue-app.example.json` дополнен блоком `resilience` с `permissionPolicy: Manual` и `autoRespondToRecoverableQuestions: false`.
+- Runtime config дополнен блоком `resilience` с `permissionPolicy: Manual` и `autoRespondToRecoverableQuestions: false`.
 - Старые названия проекта в изменённых документах не добавлялись.
 
 ## Проверки

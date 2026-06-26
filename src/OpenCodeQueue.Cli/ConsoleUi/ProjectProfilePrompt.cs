@@ -1,4 +1,5 @@
 using OpenCodeQueue.Core.Configuration;
+using OpenCodeQueue.Core.Discovery;
 using OpenCodeQueue.Core.Ports;
 
 namespace OpenCodeQueue.Cli.ConsoleUi;
@@ -49,6 +50,26 @@ public sealed class ProjectProfilePrompt(IConsoleReporter reporter)
             QualityDir = qualityDir,
             StateDir = stateDir,
             OpenCodeOverrides = settings
+        };
+    }
+
+    public ProjectProfile ReadDiscoveredProject(DiscoveredProject discovered, string projectId, OpenCodeSettings defaults)
+    {
+        var projectDir = Path.GetFullPath(discovered.ProjectDir ?? throw new InvalidOperationException("projectDir не найден."));
+        var displayName = reporter.ReadLine($"Название проекта [{discovered.DisplayName}]: ");
+        var promptsDir = reporter.AskDirectory("Папка prompts", Path.Combine(projectDir, "prompts"), projectDir);
+        var qualityDir = reporter.AskDirectory("Папка quality/reviews", Path.Combine(projectDir, "quality"), projectDir);
+        var stateDir = reporter.AskDirectory("Папка состояния", Path.Combine(projectDir, ".queue"), projectDir);
+
+        return new ProjectProfile
+        {
+            Id = projectId,
+            DisplayName = string.IsNullOrWhiteSpace(displayName) ? discovered.DisplayName : displayName.Trim(),
+            ProjectDir = projectDir,
+            PromptsDir = promptsDir,
+            QualityDir = qualityDir,
+            StateDir = stateDir,
+            OpenCodeOverrides = defaults
         };
     }
 
