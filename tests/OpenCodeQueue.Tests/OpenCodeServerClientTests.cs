@@ -302,6 +302,41 @@ public sealed class OpenCodeServerClientTests
         Assert.Contains("recovery failed", result.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task TryRecoverStepAsync_WithExistingRecoveryMessage_DoesNotSendAnotherRecoveryPrompt()
+    {
+        var root = NewProjectDir();
+        var project = ExternalProject(root);
+        var postCount = 0;
+        using var httpClient = new HttpClient(new FakeHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/session/ses-1/message" && request.Method == HttpMethod.Post)
+            {
+                postCount++;
+                return Task.FromResult(Json(new { info = new { id = "unexpected" } }));
+            }
+
+            return Task.FromResult(request.RequestUri!.AbsolutePath switch
+            {
+                "/global/health" => Json(new { healthy = true, version = "test" }),
+                "/path" => Json(new { worktree = root, directory = root }),
+                "/session/ses-1" => Json(new { id = "ses-1", directory = root, title = "test" }),
+                "/session/status" => Json(new Dictionary<string, object> { ["ses-1"] = new { type = "idle" } }),
+                "/session/ses-1/message" => Json(new object[] { new { info = new { id = "msg-1-recover", role = "user", time = new { created = 1 } } } }),
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
+            });
+        }));
+        var client = new OpenCodeServerClient(httpClient, new FakeProcessFactory());
+        var manifest = new RunManifest { RunId = "run-1", ProjectId = project.Id, SessionId = "ses-1", ProjectDirSnapshot = root };
+        var step = new WorkflowStep { Id = WorkflowStepId.Task, Kind = PromptKind.Task, SourcePath = Path.Combine(root, "prompts", "01.md"), SessionMessageId = "msg-1", RecoveryMessageId = "msg-1-recover" };
+
+        var result = await client.TryRecoverStepAsync(project, manifest, step, CancellationToken.None);
+
+        Assert.Equal(StepRecoveryOutcome.ConservativeContinueSent, result.Outcome);
+        Assert.Equal("msg-1-recover", result.MessageId);
+        Assert.Equal(0, postCount);
+    }
+
     private static ProjectProfile ManagedProject(string root)
     {
         return new ProjectProfile

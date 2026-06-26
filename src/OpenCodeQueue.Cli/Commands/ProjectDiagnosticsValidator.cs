@@ -22,12 +22,6 @@ public sealed class ProjectDiagnosticsValidator
         RequireDirectory(ProjectPaths.QualityDir(project), "qualityDir", errors);
         RequireWritableDirectory(ProjectPaths.StateDir(project), "stateDir", errors);
         RequireWritableDirectory(ProjectPaths.CompletedDir(project), "completedDir", errors);
-        RequireWritableDirectory(Path.Combine(ProjectPaths.StateDir(project), "failed"), "failedDir", errors);
-
-        if (HasQualityReviewsConflict(project))
-        {
-            errors.Add("Одновременно заданы разные qualityDir и reviewsDir. Оставьте один источник quality prompts.");
-        }
 
         if (discovery.TaskPrompts.Count == 0)
         {
@@ -50,19 +44,6 @@ public sealed class ProjectDiagnosticsValidator
         }
 
         return new ProjectDiagnosticsResult(errors, warnings);
-    }
-
-    private static bool HasQualityReviewsConflict(ProjectProfile project)
-    {
-        if (string.IsNullOrWhiteSpace(project.QualityDir) || string.IsNullOrWhiteSpace(project.ReviewsDir))
-        {
-            return false;
-        }
-
-        var reviewsDir = Path.IsPathRooted(project.ReviewsDir)
-            ? project.ReviewsDir
-            : Path.Combine(project.ProjectDir, project.ReviewsDir);
-        return !ProjectPaths.AreSamePath(project.QualityDir, reviewsDir);
     }
 
     private static void RequireDirectory(string path, string label, List<string> errors)

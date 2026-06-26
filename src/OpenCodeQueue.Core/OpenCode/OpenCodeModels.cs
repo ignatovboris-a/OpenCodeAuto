@@ -48,7 +48,7 @@ public enum StepRecoveryOutcome
     NotFound
 }
 
-public sealed record StepRecoveryResult(StepRecoveryOutcome Outcome, string? Message = null);
+public sealed record StepRecoveryResult(StepRecoveryOutcome Outcome, string? Message = null, string? MessageId = null);
 
 public class OpenCodeClientException : Exception
 {

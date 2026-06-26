@@ -106,6 +106,7 @@ public sealed class ProjectCommandTests
         var configPath = Path.Combine(root, "opencode-queue.json");
         var projectDir = Path.Combine(root, "project");
         Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
+        Directory.CreateDirectory(Path.Combine(projectDir, "quality"));
         await File.WriteAllTextAsync(Path.Combine(projectDir, "prompts", "01.md"), "task");
         var registry = new JsonProjectRegistry(new JsonAppConfigStore());
         var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir };
@@ -135,6 +136,7 @@ public sealed class ProjectCommandTests
         var configPath = Path.Combine(root, "opencode-queue.json");
         var projectDir = Path.Combine(root, "project");
         Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
+        Directory.CreateDirectory(Path.Combine(projectDir, "quality"));
         await File.WriteAllTextAsync(Path.Combine(projectDir, "prompts", "01.md"), "task");
         var registry = new JsonProjectRegistry(new JsonAppConfigStore());
         await registry.AddOrUpdateAsync(configPath, new ProjectProfile { Id = "project-a", ProjectDir = projectDir }, CancellationToken.None);

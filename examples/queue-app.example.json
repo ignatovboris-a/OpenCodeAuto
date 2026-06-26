@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "activeProjectId": "project-a",
+  "defaults": {
+    "openCodeMode": "Server",
+    "openCodeExecutable": "opencode",
+    "serverUrl": "http://localhost:4096",
+    "manageOpenCodeServer": true,
+    "serverUsername": "opencode",
+    "serverPassword": null,
+    "promptTransport": "Auto",
+    "maxInlinePromptChars": 24000,
+    "consoleVerbosity": "Normal"
+  },
+  "projects": [
+    {
+      "id": "project-a",
+      "displayName": "Project A",
+      "projectDir": "C:/dev/project-a",
+      "promptsDir": "prompts",
+      "qualityDir": "quality",
+      "stateDir": ".queue"
+    },
+    {
+      "id": "project-b",
+      "displayName": "Project B",
+      "projectDir": "/home/user/dev/project-b",
+      "promptsDir": "prompts",
+      "qualityDir": "quality",
+      "stateDir": ".queue"
+    }
+  ]
+}

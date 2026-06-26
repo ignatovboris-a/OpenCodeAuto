@@ -22,11 +22,6 @@ public enum ArchiveStatus
     Failed
 }
 
-public enum RecoveryStrategy
-{
-    ConservativeContinue
-}
-
 public enum WorkflowStepStatus
 {
     Pending,
@@ -64,6 +59,8 @@ public sealed record WorkflowStep
 
     public string? SessionMessageId { get; init; }
 
+    public string? RecoveryMessageId { get; init; }
+
     public DateTimeOffset? StartedAt { get; init; }
 
     public DateTimeOffset? CompletedAt { get; init; }
@@ -100,8 +97,6 @@ public sealed record RunManifest
     public ArchiveStatus ArchiveStatus { get; init; } = ArchiveStatus.NotStarted;
 
     public int RecoveryAttempts { get; init; }
-
-    public RecoveryStrategy RecoveryStrategy { get; init; } = RecoveryStrategy.ConservativeContinue;
 
     public DateTimeOffset CreatedAt { get; init; }
 

@@ -1,131 +1,392 @@
-# OpenCodeQueue — набор задач для программирующего агента
+# OpenCodeQueue
 
-Этот архив содержит самостоятельные Markdown-промпты для поэтапной реализации консольного приложения `OpenCodeQueue` на C# / .NET 9.
+`OpenCodeQueue` - консольное приложение на C# / .NET 9 для последовательного запуска Markdown-промптов в OpenCode.
 
-## Что изменено в этой версии
+Приложение берёт следующую задачу из папки `prompts`, запускает её в отдельной сессии OpenCode, затем в той же сессии выполняет все проверочные prompts из `quality` по порядку. Следующая task не начинается, пока текущая task и все её quality steps не завершены успешно.
 
-В набор задач добавлен полноценный сценарий **multi-project runner**:
+Консольный вывод приложения - на русском языке. Текст пользовательских `.md` prompt-файлов не переводится, не нормализуется и не улучшается: runner передаёт его агенту как есть.
 
-- собственный registry проектов `OpenCodeQueue`;
-- `activeProjectId`;
-- первый старт с выбором/добавлением проекта;
-- стартовое меню на русском языке;
-- команды `project list/current/select/add/remove/update/discover`;
-- проверка, что OpenCode работает именно с выбранным `projectDir`;
-- project-scoped state в `.queue` каждого проекта.
+## Что Делает
 
-## Как использовать
+`OpenCodeQueue` помогает запускать пачки задач для одного или нескольких проектов:
 
-1. Создай новый пустой репозиторий для консольного приложения.
-2. Скопируй папку `implementation-prompts` рядом с репозиторием или внутрь него.
-3. Отправляй программирующему агенту промпты строго по порядку: `01...md`, затем `02...md`, и так далее до `12...md`.
-4. После каждого шага запускай build/tests, если агент сам этого не сделал.
-5. Файлы в `runtime-quality-examples` — это примеры будущих runtime quality prompts для самого `OpenCodeQueue`; они не являются задачами реализации приложения.
+- хранит собственный registry проектов в `opencode-queue.json`;
+- явно выбирает active project внутри runner;
+- обнаруживает numbered Markdown prompts;
+- выполняет workflow `task -> quality-01 -> quality-02 -> ...`;
+- сохраняет состояние без базы данных в JSON/JSONL;
+- восстанавливает активный run после падения приложения или перезапуска компьютера;
+- переносит успешно выполненный task prompt в completed archive;
+- оставляет quality prompts на месте и переиспользует их для каждой task.
 
-## Основная архитектурная идея
+## Multi-Project Registry
 
-Runner должен быть устойчивым к падениям и к работе с несколькими проектами. Для этого:
+`OpenCodeQueue` поддерживает много целевых проектов. Для каждого проекта в registry задаются:
 
-- глобальный `opencode-queue.json` хранит список project profiles и `activeProjectId`;
-- каждый project profile хранит собственные `projectDir`, `promptsDir`, `qualityDir`, `stateDir`;
-- workflow state хранится в `.queue` выбранного проекта, а не в глобальном registry;
-- при запуске workflow runner создаёт или восстанавливает конкретную сессию OpenCode и сохраняет `sessionId` в manifest;
-- OpenCode UI/TUI/Desktop не считается источником истины для выбора проекта: runner должен явно передавать или проверять `projectDir`.
+- `projectDir` - корень целевого проекта;
+- `promptsDir` - папка основных task prompts;
+- `qualityDir` или alias `reviewsDir` - папка проверочных prompts;
+- `stateDir` - локальная папка состояния runner, обычно `.queue`.
 
-Пример структуры целевого проекта:
+Registry `OpenCodeQueue` является источником истины. Выбранный проект в OpenCode UI, Desktop или TUI не используется как active project для runner. Это важно, потому что UI может быть открыт в одном проекте, а очередь должна работать строго с `projectDir`, выбранным в `opencode-queue.json` или через `--project`.
+
+Если используется уже работающий OpenCode Server, runner проверяет, что server current path соответствует выбранному `projectDir`. При несовпадении очередь автоматически не запускается и выводится русскоязычное предупреждение.
+
+## Структура Проекта
+
+Минимальная структура целевого проекта:
 
 ```text
-project-a/
+project/
   prompts/
-    01-add-auth.md
-    02-refactor-users.md
+  quality/
+  .queue/
+```
+
+Пример после нескольких запусков:
+
+```text
+project/
+  prompts/
+    02-next-task.md
   quality/
     01-self-check.md
     02-architecture-risks.md
+    03-final-report.md
   .queue/
     state.json
     events.jsonl
+    lock
     runs/
+      20260626-120000-abcdef123/
+        manifest.json
+        snapshots/
     completed/
-    failed/
+      20260626-121500_01-first-task.md
 ```
 
-Пример app config:
+`prompts` содержит основные task prompts. После успешного workflow task prompt перемещается в `.queue/completed` или в `completedDir`, если он задан в project profile.
+
+`quality` содержит проверочные prompts. Эти файлы не перемещаются, не архивируются и используются повторно для каждой task.
+
+`promptsDir` и `qualityDir` должны существовать перед запуском очереди. Если одна из папок отсутствует или недоступна, `run` останавливается с validation error до создания run и до обращения к OpenCode.
+
+`.queue` содержит состояние выбранного проекта. Его не нужно переносить между проектами.
+
+## App Config
+
+По умолчанию приложение читает `opencode-queue.json` из текущей директории. Другой путь можно передать через `--config`.
+
+Общая форма:
 
 ```text
 opencode-queue.json
-  activeProjectId: project-a
-  projects:
-    - project-a -> C:/dev/project-a
-    - project-b -> /home/user/dev/project-b
+  schemaVersion
+  activeProjectId
+  defaults
+  projects[]
 ```
 
-## Порядок implementation prompts
+Пример есть в `examples/queue-app.example.json`.
 
-```text
-implementation-prompts/
-  01-project-foundation.md
-  02-configuration-and-domain-model.md
-  03-project-registry-and-start-menu.md
-  04-numbered-file-discovery.md
-  05-state-locking-and-crash-recovery.md
-  06-opencode-server-client.md
-  07-cli-fallback-client.md
-  08-workflow-orchestrator-and-file-transitions.md
-  09-russian-console-logging-status.md
-  10-tests-and-fakes.md
-  11-docs-examples-packaging.md
-  12-final-hardening-review.md
+Правила путей в текущей реализации:
+
+- относительный `projectDir` разрешается относительно директории файла config;
+- `promptsDir`, `qualityDir`, `reviewsDir`, `stateDir` и `completedDir` разрешаются относительно `projectDir`;
+- абсолютные пути используются как есть;
+- пути с пробелами и Unicode поддерживаются через стандартные API .NET.
+
+`activeProjectId` выбирает проект по умолчанию. Команда с `--project <id>` временно использует указанный проект и не меняет `activeProjectId`.
+
+`defaults` задаёт настройки OpenCode по умолчанию. Каждый проект наследует эти значения; объект `openCodeOverrides` внутри project profile может переопределить только нужные поля.
+
+## Первый Старт И Меню
+
+Запуск без аргументов открывает русскоязычное меню:
+
+```bash
+opencode-queue
 ```
 
-## Runtime quality examples
+Меню показывает active project, пути `promptsDir`, `qualityDir`, `stateDir`, количество задач, активный run и действия:
+
+- запустить очередь до конца;
+- запустить одну следующую задачу;
+- продолжить или восстановить active run;
+- показать статус;
+- показать список задач и quality prompts;
+- выбрать или сменить проект;
+- добавить проект;
+- диагностика проекта;
+- настройки проекта;
+- выход.
+
+Если project ещё не выбран или недоступен, первый старт предлагает выбрать проект из registry, добавить проект вручную или повторить discovery. Discovery делает best-effort поиск кандидатов, включая локальные OpenCode project storage и доступный OpenCode server, но ручной ввод пути доступен всегда.
+
+## Имена Prompt-Файлов
+
+В очередь попадают только `.md` файлы верхнего уровня с числовым префиксом:
 
 ```text
-runtime-quality-examples/
-  01-self-check.md
-  02-architecture-risks.md
-  03-final-report.md
+01.md
+01-add-auth.md
+0.1.md
+0.1. auth.md
+0.0.2-refactor.md
 ```
 
-`quality` prompts не перемещаются и переиспользуются для каждой задачи. Task prompt из `prompts` переносится в completed archive только после успешного завершения task step и всех quality steps.
+Task prompts лежат в `promptsDir`. Quality prompts лежат в `qualityDir`. Файлы без числового префикса пропускаются с warning. Task-файлы, имя которых начинается с `_`, игнорируются.
 
-## Текущий каркас решения
+## Numeric Sorting
 
-Solution `OpenCodeQueue.sln` содержит четыре проекта:
+Сортировка идёт по числовым сегментам префикса, разделённым точками.
 
-- `src/OpenCodeQueue.Core` — доменная модель, статусы и интерфейсы портов для registry проектов, discovery, OpenCode, prompt repository, state store, lock, archiver и console reporter.
-- `src/OpenCodeQueue.Infrastructure` — минимальные адаптеры файловой системы: JSON config/registry, поиск numbered Markdown prompts, state JSON/JSONL, lock-файл, archiver и заглушка OpenCode client.
-- `src/OpenCodeQueue.Cli` — composition root, простой parser команд, русскоязычный console reporter и стартовое меню.
-- `tests/OpenCodeQueue.Tests` — unit tests без реального OpenCode.
-
-## Runtime-директории
-
-- `prompts` — папка основных task prompt-файлов. В очередь попадают `.md` файлы с числовым префиксом: `01.md`, `01-auth.md`, `0.1.md`, `0.0.2-refactor.md`.
-- `quality` или `reviews` — папка проверочных prompt-файлов. Эти файлы не перемещаются и будут переиспользоваться для каждой task.
-- `.queue` — project-scoped состояние runner: будущие `state.json`, `events.jsonl`, lock-файл, run manifests и архив `completed`.
-- `opencode-queue.json` — глобальный registry проектов `OpenCodeQueue`; он хранит `activeProjectId` и профили проектов с `projectDir`, `promptsDir`, `qualityDir`, `stateDir`.
-
-## Ограничения CLI fallback
-
-CLI fallback всегда запускает `opencode` с рабочей директорией `projectDir` и аргументом `--dir <projectDir>`. Для продолжения используется только конкретный `--session <sessionId>`; `--continue` не применяется как recovery-механизм, потому что может продолжить не ту session.
-
-Если после crash в manifest нет `sessionId`, автоматическое восстановление через CLI запрещено: run должен перейти в failed/manual intervention. Если `sessionId` есть, adapter может выполнить только conservative recovery в этой session, потому что CLI не предоставляет такой же доказуемый status/messages API, как OpenCode Server API.
-
-Для больших prompt-файлов CLI adapter использует attachment mode: `--file <prompt.md>` и короткую русскую wrapper-инструкцию. Полный текст prompt не пишется в command log; stdout/stderr процесса сохраняются в `.queue/runs/<runId>/logs/<stepId>.stdout.log` и `.queue/runs/<runId>/logs/<stepId>.stderr.log`, когда orchestration передаёт `runId` и `stepId`.
-
-## Стартовое меню
-
-Запуск без аргументов входит в интерактивное меню на русском языке. Меню показывает текущий активный проект и пункты: запуск очереди, запуск одной задачи, восстановление run, статус, список задач, выбор проекта, добавление проекта, диагностика и выход. На этом шаге workflow-команды являются безопасными заглушками.
-
-## Минимальные команды
+Пример порядка:
 
 ```text
-opencode-queue --help
-opencode-queue menu --config opencode-queue.json
-opencode-queue run --config opencode-queue.json [--project <id>] [--once]
-opencode-queue validate --config opencode-queue.json
-opencode-queue project list --config opencode-queue.json
-opencode-queue project current --config opencode-queue.json
-opencode-queue project select <id> --config opencode-queue.json
+0.0.2-refactor.md
+0.1.md
+0.1. auth.md
+01-example.md
+02-next.md
+10-large-change.md
+```
+
+Сегменты сравниваются как числа, поэтому `2` идёт раньше `10`, а `1.2` раньше `1.10`. Если числовые ключи равны (`01` и `1`), порядок стабилизируется по имени файла и полному пути.
+
+## Workflow Run
+
+Для каждой task runner создаёт или восстанавливает одну конкретную сессию OpenCode и выполняет в ней цепочку:
+
+```text
+task prompt
+quality prompt 01
+quality prompt 02
+quality prompt 03
+...
+```
+
+Новая task не выбирается, пока active run не завершён, не восстановлен, не aborted или не требует ручного вмешательства.
+
+Перед отправкой каждого prompt runner делает snapshot файла в `.queue/runs/<runId>/snapshots/`. Snapshot нужен, чтобы recovery и audit не зависели от изменения исходного файла во время run.
+
+Перед созданием run runner выполняет preflight выбранного OpenCode adapter. Если внешний OpenCode Server открыт для другого `projectDir` или OpenCode недоступен, новая task не выбирается, prompt не отправляется и active run не создаётся.
+
+## Recovery После Crash
+
+Состояние хранится без БД:
+
+- `.queue/state.json` - active run и последний завершённый run;
+- `.queue/events.jsonl` - журнал событий;
+- `.queue/runs/<runId>/manifest.json` - manifest конкретного run;
+- `.queue/runs/<runId>/snapshots/` - копии task и quality prompts для run;
+- `.queue/lock` - lock одного runner на проект.
+
+После crash используйте:
+
+```bash
+opencode-queue status --config opencode-queue.json
+opencode-queue resume --config opencode-queue.json
+```
+
+Если в `state.json` есть `activeRunId`, новый `run` не выберет следующую task. Нужно выполнить `resume`, проверить статус или сознательно сделать `abort`.
+
+Если OpenCode недоступен во время `resume`, состояние active run сохраняется, новая task не выбирается, а пользователю выводится русскоязычная ошибка. Для незавершённого running step без `sessionId` автоматическое восстановление останавливается в `NeedsManualIntervention`, чтобы не повторить prompt в новой session.
+
+## Почему Session Id В Manifest
+
+`sessionId` сохраняется в `.queue/runs/<runId>/manifest.json`, потому что восстановление должно продолжать именно ту OpenCode session, где уже выполнялась task. Без этого runner рискует повторить prompt в новой session или продолжить не тот контекст.
+
+Server API режим предпочтителен: он позволяет создать сессию, сохранить её id, отправлять сообщения в конкретную сессию и после рестарта продолжить именно её.
+
+CLI fallback менее надёжен. Он допустим, но не должен быть единственным recovery-механизмом. `--continue` без конкретного session id не используется как recovery, потому что может продолжить не ту сессию. Если session id известен, CLI fallback работает только с конкретной session.
+
+## Completed Archive
+
+Task prompt переносится в completed archive только после успешного выполнения task step и всех quality steps.
+
+По умолчанию archive находится здесь:
+
+```text
+project/.queue/completed/
+```
+
+Имя архивного файла получает timestamp:
+
+```text
+20260626-121500_01-example-task.md
+```
+
+Перед переносом проверяется SHA-256 исходного task prompt. Если файл изменился после snapshot, архивирование останавливается, run остаётся в `CompletedPendingArchive`, а файл нужно проверить вручную.
+
+## Ошибка Step
+
+Если task step или quality step завершился ошибкой, run получает статус `Failed`, а новая task не выбирается. Что делать:
+
+1. Посмотреть статус: `opencode-queue status --config opencode-queue.json`.
+2. Проверить `.queue/runs/<runId>/manifest.json` и `.queue/events.jsonl`.
+3. Исправить проблему в проекте, OpenCode или prompt-файле.
+4. Запустить `opencode-queue resume --config opencode-queue.json`.
+
+Если автоматическое восстановление небезопасно, run может перейти в `NeedsManualIntervention`. В этом случае проверьте manifest вручную. Команда `abort` переводит active run в `Aborted` без удаления данных и без автоматического архивирования task prompt.
+
+## Status И Logs
+
+Основные команды:
+
+```bash
+opencode-queue status --config opencode-queue.json
+opencode-queue list --config opencode-queue.json
+opencode-queue doctor --config opencode-queue.json
+```
+
+`status` показывает количество task prompts, quality prompts и active run. `list` показывает найденные prompt-файлы в порядке выполнения. `doctor` запускает validation, проверяет state/lock и доступность OpenCode для выбранного `projectDir`.
+
+Runtime-данные находятся в `.queue`. Смотрите `events.jsonl` для хронологии и `runs/<runId>/manifest.json` для детального состояния step-by-step. CLI adapter может сохранять stdout/stderr OpenCode в run logs, если соответствующий транспорт задействован реализацией adapter.
+
+Полный prompt text не пишется в command log как command-line argument; для длинных prompts используется attachment transport. Snapshot prompt осознанно хранится в `.queue/runs/<runId>/snapshots/`. `serverPassword` не сохраняется в manifest в исходном виде: snapshot настроек OpenCode в manifest содержит redacted-значение.
+
+## Server API И CLI Fallback
+
+Рекомендуемый режим - `Server`:
+
+- managed server запускается в `projectDir`;
+- runner может проверить project path;
+- session id явно сохраняется и используется для recovery;
+- проще понять состояние конкретной сессии.
+
+CLI fallback полезен как запасной режим, но имеет ограничения:
+
+- runner обязан передавать `--dir <projectDir>`;
+- recovery безопасен только при известном `sessionId`;
+- нельзя полагаться на неявное `--continue`;
+- диагностика статуса беднее, чем через Server API.
+
+## CLI Examples
+
+```bash
+opencode-queue
 opencode-queue project add --config opencode-queue.json
+opencode-queue project list --config opencode-queue.json
+opencode-queue project select project-a --config opencode-queue.json
+opencode-queue list --config opencode-queue.json
+opencode-queue status --config opencode-queue.json
+opencode-queue doctor --config opencode-queue.json
+opencode-queue run --config opencode-queue.json --once
+opencode-queue run --config opencode-queue.json
+opencode-queue resume --config opencode-queue.json
+opencode-queue run --config opencode-queue.json --project project-b --once
 ```
+
+Дополнительные команды:
+
+```bash
+opencode-queue validate --config opencode-queue.json
+opencode-queue abort --config opencode-queue.json
+opencode-queue project current --config opencode-queue.json
+opencode-queue project discover --config opencode-queue.json
+opencode-queue project update project-a --config opencode-queue.json
+opencode-queue project remove project-a --config opencode-queue.json
+```
+
+## Windows Быстрый Старт
+
+```powershell
+dotnet restore
+dotnet build
+dotnet test
+dotnet run --project src/OpenCodeQueue.Cli -- --help
+dotnet run --project src/OpenCodeQueue.Cli -- project add --config opencode-queue.json
+dotnet run --project src/OpenCodeQueue.Cli -- doctor --config opencode-queue.json
+dotnet run --project src/OpenCodeQueue.Cli -- run --config opencode-queue.json --once
+```
+
+После publish можно запускать бинарь `opencode-queue.exe`, если вы переименовали output или добавили папку publish в `PATH`.
+
+## Linux Быстрый Старт
+
+```bash
+dotnet restore
+dotnet build
+dotnet test
+dotnet run --project src/OpenCodeQueue.Cli -- --help
+dotnet run --project src/OpenCodeQueue.Cli -- project add --config opencode-queue.json
+dotnet run --project src/OpenCodeQueue.Cli -- doctor --config opencode-queue.json
+dotnet run --project src/OpenCodeQueue.Cli -- run --config opencode-queue.json --once
+```
+
+После publish можно запускать файл `OpenCodeQueue.Cli` из publish-директории или создать shell alias `opencode-queue`.
+
+## Build И Publish
+
+```bash
+dotnet restore
+dotnet build
+dotnet test
+dotnet publish src/OpenCodeQueue.Cli -c Release -r win-x64 --self-contained false
+dotnet publish src/OpenCodeQueue.Cli -c Release -r linux-x64 --self-contained false
+```
+
+Результат publish находится в:
+
+```text
+src/OpenCodeQueue.Cli/bin/Release/net9.0/<runtime>/publish/
+```
+
+`--self-contained false` означает, что на целевой машине должен быть установлен совместимый .NET Runtime.
+
+## Single-File Publish
+
+Если нужен один исполняемый файл:
+
+```bash
+dotnet publish src/OpenCodeQueue.Cli -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
+dotnet publish src/OpenCodeQueue.Cli -c Release -r linux-x64 --self-contained false -p:PublishSingleFile=true
+```
+
+Trade-offs:
+
+- удобнее копировать один файл;
+- startup может быть немного медленнее;
+- диагностика publish output менее прозрачна;
+- при `--self-contained false` .NET Runtime всё равно нужен на целевой машине.
+
+Для полностью автономного бинаря можно использовать `--self-contained true`, но размер publish output будет значительно больше.
+
+## Examples
+
+В репозитории есть демонстрационные файлы:
+
+```text
+examples/
+  queue-app.example.json
+  queue-app.example.md
+  prompts/
+    01-example-task.md
+  quality/
+    01-self-check.md
+    02-architecture-risks.md
+    03-final-report.md
+```
+
+`queue-app.example.json` является валидным JSON без комментариев. Пояснения вынесены в `queue-app.example.md`.
+
+## Security Notes
+
+- Unattended OpenCode может менять файлы выбранного проекта.
+- Всегда проверяйте active project перед запуском очереди: `opencode-queue project current --config opencode-queue.json`.
+- Не храните секреты в prompt files, `.queue/events.jsonl`, manifest и logs.
+- Не включайте опасные auto-approve permissions без осознанного решения.
+- Не запускайте runner одновременно в одном проекте из нескольких терминалов.
+- Перед первым unattended run лучше сделать clean `git status` и commit или backup.
+
+## Практический Checklist
+
+1. Установить .NET 9 SDK и OpenCode.
+2. Создать или выбрать целевой проект.
+3. Добавить `prompts/`, `quality/`, `.queue/` в проект.
+4. Создать `opencode-queue.json` или выполнить `opencode-queue project add --config opencode-queue.json`.
+5. Проверить active project: `opencode-queue project current --config opencode-queue.json`.
+6. Проверить prompts: `opencode-queue list --config opencode-queue.json`.
+7. Запустить диагностику: `opencode-queue doctor --config opencode-queue.json`.
+8. Сделать первый безопасный запуск: `opencode-queue run --config opencode-queue.json --once`.

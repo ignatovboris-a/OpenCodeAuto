@@ -16,7 +16,7 @@ opencode-queue.json
 - `displayName`;
 - `projectDir`;
 - `promptsDir`;
-- `qualityDir` или legacy alias `reviewsDir`;
+- `qualityDir` или alias `reviewsDir`;
 - `stateDir`;
 - OpenCode settings/overrides.
 
@@ -74,7 +74,6 @@ project/
     events.jsonl
     runs/
     completed/
-    failed/
 ```
 
 `quality` выбрана как основное имя папки для проверочных prompt-файлов. `reviews` можно поддержать как alias в конфиге, но внутри кода лучше использовать один термин: `Quality`.

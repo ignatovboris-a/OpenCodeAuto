@@ -21,9 +21,14 @@ public sealed class FileRunLock(IClock? clock = null) : IRunLock
         if (File.Exists(lockPath))
         {
             var existing = await ReadAsync(project, cancellationToken);
-            return new RunLockAcquireResult(null, existing, existing?.IsStale == true
-                ? "Найден stale lock. Выполните resume для восстановления или force unlock после проверки."
-                : "Очередь этого проекта уже запущена другим процессом.");
+            if (existing?.IsStale == true)
+            {
+                FileCleanup.TryDelete(lockPath);
+            }
+            else
+            {
+                return new RunLockAcquireResult(null, existing, "Очередь этого проекта уже запущена другим процессом.");
+            }
         }
 
         try

@@ -47,6 +47,11 @@ public sealed class QueueUseCases(
             }
 
             var discovery = await promptRepository.DiscoverAsync(project, cancellationToken);
+            if (HasBlockingDiscoveryWarning(discovery, out var warning))
+            {
+                return QueueOperationResult.Failure(QueueExitCodes.ValidationError, warning) with { Project = project, State = state, Discovery = discovery };
+            }
+
             if (discovery.TaskPrompts.Count == 0)
             {
                 return new QueueOperationResult
@@ -54,8 +59,14 @@ public sealed class QueueUseCases(
                     Project = project,
                     State = state,
                     Discovery = discovery,
-                    Messages = [.. messages, "Очередь задач пуста."]
+                    Messages = [.. messages, .. discovery.Warnings, "Очередь задач пуста."]
                 };
+            }
+
+            var ready = await EnsureOpenCodeReadyAsync(project, state, null, cancellationToken);
+            if (ready is not null)
+            {
+                return ready with { Discovery = discovery };
             }
 
             var manifest = await CreateRunAsync(project, state, discovery.TaskPrompts[0], discovery.QualityPrompts, cancellationToken);
@@ -113,6 +124,12 @@ public sealed class QueueUseCases(
         {
             var manual = await SaveManualRunAsync(project, state.ActiveRunId, "manifest.json отсутствует", cancellationToken);
             return QueueOperationResult.Failure(QueueExitCodes.ValidationError, $"manifest.json для activeRunId '{state.ActiveRunId}' отсутствует. Новая задача не выбирается; проверьте .queue/runs вручную.") with { Project = project, State = state, Manifest = manual };
+        }
+
+        var ready = await EnsureOpenCodeReadyAsync(project, state, manifest, cancellationToken);
+        if (ready is not null)
+        {
+            return ready;
         }
 
         await AppendEventAsync(project, QueueEventTypes.RecoveryStarted, manifest.RunId, null, manifest.SessionId, null, "Resume active run", cancellationToken);
@@ -191,21 +208,32 @@ public sealed class QueueUseCases(
         }
 
         var manifest = await stateStore.LoadRunManifestAsync(project, state.ActiveRunId, cancellationToken);
+        string? abortWarning = null;
         if (!string.IsNullOrWhiteSpace(manifest?.SessionId))
         {
-            await openCodeClient.AbortSessionAsync(project, manifest.SessionId, cancellationToken);
+            try
+            {
+                await openCodeClient.AbortSessionAsync(project, manifest.SessionId, cancellationToken);
+            }
+            catch (Exception exception) when (exception is OpenCodeClientException or IOException or InvalidOperationException or UnauthorizedAccessException)
+            {
+                abortWarning = "OpenCode session не удалось abort через adapter: " + exception.Message;
+            }
         }
 
         var now = clock.Now;
         if (manifest is not null)
         {
-            manifest = manifest with { Status = RunStatus.Aborted, UpdatedAt = now, FinishedAt = now };
+            manifest = manifest with { Status = RunStatus.Aborted, LastError = abortWarning, UpdatedAt = now, FinishedAt = now };
             await stateStore.SaveRunManifestAsync(project, manifest, cancellationToken);
         }
 
         await stateStore.SaveQueueStateAsync(project, state with { ActiveRunId = null, UpdatedAt = now }, cancellationToken);
-        await AppendEventAsync(project, QueueEventTypes.RunAborted, state.ActiveRunId, null, manifest?.SessionId, manifest?.TaskDescriptor?.FileName, null, cancellationToken);
-        return QueueOperationResult.Success("Run переведён в Aborted. Данные сохранены, task prompt не архивирован автоматически.") with { Project = project, Manifest = manifest };
+        await AppendEventAsync(project, QueueEventTypes.RunAborted, state.ActiveRunId, null, manifest?.SessionId, manifest?.TaskDescriptor?.FileName, abortWarning, cancellationToken);
+        var messages = abortWarning is null
+            ? new[] { "Run переведён в Aborted. Данные сохранены, task prompt не архивирован автоматически." }
+            : new[] { "Run переведён в Aborted локально. Данные сохранены, task prompt не архивирован автоматически.", abortWarning };
+        return QueueOperationResult.Success(messages) with { Project = project, Manifest = manifest };
     }
 
     private async Task<RunManifest> CreateRunAsync(ProjectProfile project, QueueState state, PromptDescriptor task, IReadOnlyList<PromptDescriptor> qualityPrompts, CancellationToken cancellationToken)
@@ -246,7 +274,7 @@ public sealed class QueueUseCases(
             ProjectDirSnapshot = project.ProjectDir,
             PromptsDirSnapshot = project.PromptsDir,
             QualityDirSnapshot = project.QualityDir ?? project.ReviewsDir,
-            OpenCodeSettingsSnapshot = project.OpenCodeOverrides,
+            OpenCodeSettingsSnapshot = project.OpenCodeOverrides.Redacted(),
             TaskDescriptor = task,
             Steps = steps,
             Status = RunStatus.Pending,
@@ -292,7 +320,16 @@ public sealed class QueueUseCases(
                     return await MarkManualAsync(project, manifest, "manifest не содержит sessionId для незавершённого running step; автоматическое восстановление остановлено, чтобы не повторить prompt в новой session.", cancellationToken);
                 }
 
-                var recovered = await openCodeClient.TryRecoverStepAsync(project, manifest, step, cancellationToken);
+                StepRecoveryResult recovered;
+                try
+                {
+                    recovered = await openCodeClient.TryRecoverStepAsync(project, manifest, step, cancellationToken);
+                }
+                catch (Exception exception) when (exception is OpenCodeClientException or IOException or InvalidOperationException or UnauthorizedAccessException)
+                {
+                    return await MarkRecoveryUnavailableAsync(project, manifest, "OpenCode недоступен во время recovery: " + exception.Message, cancellationToken);
+                }
+
                 if (recovered.Outcome == StepRecoveryOutcome.Completed)
                 {
                     manifest = await MarkStepCompletedAsync(project, manifest, index, step.SessionMessageId, cancellationToken);
@@ -306,7 +343,7 @@ public sealed class QueueUseCases(
 
                 if (recovered.Outcome == StepRecoveryOutcome.ConservativeContinueSent)
                 {
-                    return await MarkRecoveryPendingAsync(project, manifest, index, recovered.Message ?? "Отправлен recovery prompt; исходный prompt повторно не отправлялся.", cancellationToken);
+                    return await MarkRecoveryPendingAsync(project, manifest, index, recovered.Message ?? "Отправлен recovery prompt; исходный prompt повторно не отправлялся.", recovered.MessageId, cancellationToken);
                 }
             }
 
@@ -381,6 +418,10 @@ public sealed class QueueUseCases(
         {
             return await MarkStepFailedAsync(project, manifest, stepIndex, exception.Message, cancellationToken);
         }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return await MarkStepFailedAsync(project, manifest, stepIndex, exception.Message, cancellationToken);
+        }
     }
 
     private async Task<PromptPayload> BuildPayloadAsync(RunManifest manifest, WorkflowStep step, CancellationToken cancellationToken)
@@ -392,6 +433,8 @@ public sealed class QueueUseCases(
             Content = content,
             SourcePath = path,
             MessageId = $"{manifest.RunId}:{step.Id.Value}:{step.AttemptCount}",
+            Transport = manifest.OpenCodeSettingsSnapshot.PromptTransport,
+            MaxInlinePromptChars = manifest.OpenCodeSettingsSnapshot.MaxInlinePromptChars,
             RunId = manifest.RunId,
             StepId = step.Id.Value
         };
@@ -417,10 +460,10 @@ public sealed class QueueUseCases(
         return failedManifest;
     }
 
-    private async Task<RunManifest> MarkRecoveryPendingAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string message, CancellationToken cancellationToken)
+    private async Task<RunManifest> MarkRecoveryPendingAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string message, string? recoveryMessageId, CancellationToken cancellationToken)
     {
         var step = manifest.Steps[stepIndex];
-        var recovering = step with { Status = WorkflowStepStatus.Recovering };
+        var recovering = step with { Status = WorkflowStepStatus.Recovering, RecoveryMessageId = recoveryMessageId ?? step.RecoveryMessageId };
         var recoveryManifest = ReplaceStep(manifest, stepIndex, recovering) with
         {
             Status = RunStatus.Running,
@@ -431,6 +474,14 @@ public sealed class QueueUseCases(
         await stateStore.SaveRunManifestAsync(project, recoveryManifest, cancellationToken);
         await AppendEventAsync(project, QueueEventTypes.RecoveryCompleted, manifest.RunId, recovering.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, message, cancellationToken);
         return recoveryManifest;
+    }
+
+    private async Task<RunManifest> MarkRecoveryUnavailableAsync(ProjectProfile project, RunManifest manifest, string message, CancellationToken cancellationToken)
+    {
+        var updated = manifest with { Status = RunStatus.Running, LastError = message, UpdatedAt = clock.Now };
+        await stateStore.SaveRunManifestAsync(project, updated, cancellationToken);
+        await AppendEventAsync(project, QueueEventTypes.RecoveryCompleted, manifest.RunId, null, manifest.SessionId, manifest.TaskDescriptor?.FileName, message, cancellationToken);
+        return updated;
     }
 
     private async Task<RunManifest> ArchiveCompletedRunAsync(ProjectProfile project, RunManifest manifest, CancellationToken cancellationToken)
@@ -502,6 +553,34 @@ public sealed class QueueUseCases(
         return string.IsNullOrWhiteSpace(projectId)
             ? await projectRegistry.GetActiveAsync(configPath, cancellationToken)
             : await projectRegistry.GetByIdAsync(configPath, projectId, cancellationToken);
+    }
+
+    private async Task<QueueOperationResult?> EnsureOpenCodeReadyAsync(ProjectProfile project, QueueState? state, RunManifest? manifest, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await openCodeClient.EnsureReadyAsync(project, cancellationToken);
+            return null;
+        }
+        catch (OpenCodeProjectMismatchException exception)
+        {
+            return QueueOperationResult.Failure(QueueExitCodes.OpenCodeUnavailableOrProjectMismatch, "OpenCode server открыт для другого проекта. Очередь автоматически не запускается. " + exception.Message) with { Project = project, State = state, Manifest = manifest };
+        }
+        catch (OpenCodeClientException exception)
+        {
+            return QueueOperationResult.Failure(QueueExitCodes.OpenCodeUnavailableOrProjectMismatch, "OpenCode недоступен: " + exception.Message) with { Project = project, State = state, Manifest = manifest };
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return QueueOperationResult.Failure(QueueExitCodes.OpenCodeUnavailableOrProjectMismatch, "Runtime-проверка OpenCode не прошла: " + exception.Message) with { Project = project, State = state, Manifest = manifest };
+        }
+    }
+
+    private static bool HasBlockingDiscoveryWarning(PromptDiscoveryResult discovery, out string message)
+    {
+        message = discovery.Warnings.FirstOrDefault(warning => warning.StartsWith("Папка tasks не существует", StringComparison.Ordinal)
+            || warning.StartsWith("Папка quality не существует", StringComparison.Ordinal)) ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(message);
     }
 
     private async Task<IAsyncDisposable?> AcquireLockAsync(ProjectProfile project, CancellationToken cancellationToken)

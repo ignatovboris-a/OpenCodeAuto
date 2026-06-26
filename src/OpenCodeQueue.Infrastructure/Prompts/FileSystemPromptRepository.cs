@@ -41,11 +41,7 @@ public sealed partial class FileSystemPromptRepository : IPromptRepository
 
         if (!Directory.Exists(fullDirectory))
         {
-            return [];
-        }
-
-        if (IsIgnoredDirectory(fullDirectory))
-        {
+            warnings.Add($"Папка {KindTitle(kind)} не существует или недоступна: {fullDirectory}");
             return [];
         }
 
@@ -108,14 +104,6 @@ public sealed partial class FileSystemPromptRepository : IPromptRepository
         }
 
         return prompts;
-    }
-
-    private static bool IsIgnoredDirectory(string directory)
-    {
-        var name = Path.GetFileName(Path.TrimEndingDirectorySeparator(directory));
-        return string.Equals(name, ".queue", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(name, "completed", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(name, "failed", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string KindTitle(PromptKind kind) => kind == PromptKind.Task ? "tasks" : "quality";

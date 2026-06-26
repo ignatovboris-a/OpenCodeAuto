@@ -237,7 +237,74 @@ public sealed class QueueUseCasesTests
         Assert.Contains("изменился", result.Manifest.LastError, StringComparison.Ordinal);
     }
 
-    private static async Task<Fixture> CreateFixtureAsync(string? failStepId = null, bool changeTaskBeforeArchive = false, bool stopOnQualityFailure = true, StepRecoveryOutcome recoveryOutcome = StepRecoveryOutcome.Completed)
+    [Fact]
+    public async Task RunQueueAsync_PassesConfiguredPromptTransportToOpenCodeClient()
+    {
+        var fixture = await CreateFixtureAsync(settings: new OpenCodeSettings
+        {
+            PromptTransport = PromptTransport.FileAttachment,
+            MaxInlinePromptChars = 7
+        });
+        await File.WriteAllTextAsync(Path.Combine(fixture.ProjectDir, "prompts", "01-task.md"), "task body");
+
+        var result = await fixture.UseCases.RunQueueAsync(fixture.ConfigPath, null, once: true, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        var payload = Assert.Single(fixture.OpenCode.Payloads);
+        Assert.Equal(PromptTransport.FileAttachment, payload.Transport);
+        Assert.Equal(7, payload.MaxInlinePromptChars);
+    }
+
+    [Fact]
+    public async Task RunQueueAsync_WhenOpenCodeProjectMismatch_DoesNotCreateRunOrSendPrompt()
+    {
+        var fixture = await CreateFixtureAsync(ensureReadyException: new OpenCodeProjectMismatchException("selected", "server"));
+        var taskPath = Path.Combine(fixture.ProjectDir, "prompts", "01-task.md");
+        await File.WriteAllTextAsync(taskPath, "task body");
+        await File.WriteAllTextAsync(Path.Combine(fixture.ProjectDir, "quality", "01-review.md"), "review");
+
+        var result = await fixture.UseCases.RunQueueAsync(fixture.ConfigPath, null, once: true, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(QueueExitCodes.OpenCodeUnavailableOrProjectMismatch, result.ExitCode);
+        Assert.Empty(fixture.OpenCode.SentStepIds);
+        Assert.True(File.Exists(taskPath));
+        var state = await fixture.StateStore.LoadQueueStateAsync(fixture.Project, CancellationToken.None);
+        Assert.Null(state!.ActiveRunId);
+    }
+
+    [Fact]
+    public async Task RunQueueAsync_WhenQualityDirIsMissing_DoesNotStartOpenCode()
+    {
+        var fixture = await CreateFixtureAsync();
+        Directory.Delete(Path.Combine(fixture.ProjectDir, "quality"), recursive: true);
+        var taskPath = Path.Combine(fixture.ProjectDir, "prompts", "01-task.md");
+        await File.WriteAllTextAsync(taskPath, "task body");
+
+        var result = await fixture.UseCases.RunQueueAsync(fixture.ConfigPath, null, once: true, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(QueueExitCodes.ValidationError, result.ExitCode);
+        Assert.Contains("Папка quality", result.Messages.Single(), StringComparison.Ordinal);
+        Assert.Empty(fixture.OpenCode.SentStepIds);
+        Assert.True(File.Exists(taskPath));
+    }
+
+    [Fact]
+    public async Task RunQueueAsync_DoesNotPersistServerPasswordInManifest()
+    {
+        var fixture = await CreateFixtureAsync(settings: new OpenCodeSettings { ServerPassword = "super-secret" });
+        await File.WriteAllTextAsync(Path.Combine(fixture.ProjectDir, "prompts", "01-task.md"), "task body");
+
+        var result = await fixture.UseCases.RunQueueAsync(fixture.ConfigPath, null, once: true, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        var manifestPath = Path.Combine(fixture.ProjectDir, ".queue", "runs", result.Manifest!.RunId, "manifest.json");
+        var manifestJson = await File.ReadAllTextAsync(manifestPath);
+        Assert.DoesNotContain("super-secret", manifestJson, StringComparison.Ordinal);
+    }
+
+    private static async Task<Fixture> CreateFixtureAsync(string? failStepId = null, bool changeTaskBeforeArchive = false, bool stopOnQualityFailure = true, StepRecoveryOutcome recoveryOutcome = StepRecoveryOutcome.Completed, OpenCodeSettings? settings = null, Exception? ensureReadyException = null)
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
         var projectDir = Path.Combine(root, "project");
@@ -246,10 +313,10 @@ public sealed class QueueUseCasesTests
         var configPath = Path.Combine(root, "opencode-queue.json");
         var configStore = new JsonAppConfigStore();
         var registry = new JsonProjectRegistry(configStore);
-        var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir, StopOnQualityFailure = stopOnQualityFailure };
+        var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir, StopOnQualityFailure = stopOnQualityFailure, OpenCodeOverrides = settings ?? new OpenCodeSettings() };
         await registry.AddOrUpdateAsync(configPath, project, CancellationToken.None);
         var stateStore = new JsonStateStore();
-        var openCode = new FakeOpenCodeClient(failStepId, changeTaskBeforeArchive, recoveryOutcome);
+        var openCode = new FakeOpenCodeClient(failStepId, changeTaskBeforeArchive, recoveryOutcome, ensureReadyException);
         var useCases = new QueueUseCases(
             registry,
             new FileSystemPromptRepository(),
@@ -277,13 +344,18 @@ public sealed class QueueUseCasesTests
         await fixture.StateStore.SaveRunManifestAsync(fixture.Project, manifest, CancellationToken.None);
     }
 
-    private sealed class FakeOpenCodeClient(string? failStepId, bool changeTaskBeforeArchive, StepRecoveryOutcome recoveryOutcome) : IOpenCodeClient
+    private sealed class FakeOpenCodeClient(string? failStepId, bool changeTaskBeforeArchive, StepRecoveryOutcome recoveryOutcome, Exception? ensureReadyException) : IOpenCodeClient
     {
         public List<string> SentStepIds { get; } = [];
 
         public List<string> SessionIds { get; } = [];
 
-        public Task EnsureReadyAsync(ProjectProfile project, CancellationToken cancellationToken) => Task.CompletedTask;
+        public List<PromptPayload> Payloads { get; } = [];
+
+        public Task EnsureReadyAsync(ProjectProfile project, CancellationToken cancellationToken)
+        {
+            return ensureReadyException is null ? Task.CompletedTask : Task.FromException(ensureReadyException);
+        }
 
         public Task<OpenCodeSession> StartSessionAsync(ProjectProfile project, string title, CancellationToken cancellationToken)
         {
@@ -316,6 +388,7 @@ public sealed class QueueUseCasesTests
         {
             SentStepIds.Add(payload.StepId!);
             SessionIds.Add(sessionId);
+            Payloads.Add(payload);
             if (changeTaskBeforeArchive && payload.StepId == "task")
             {
                 await File.WriteAllTextAsync(Path.Combine(project.ProjectDir, "prompts", "01-task.md"), "changed", cancellationToken);

@@ -7,7 +7,7 @@ namespace OpenCodeQueue.Tests;
 public sealed class FileRunLockTests
 {
     [Fact]
-    public async Task TryAcquireAsync_ReportsStaleLockWithoutDeletingIt()
+    public async Task TryAcquireAsync_TakesOverStaleLockForRecovery()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
         var stateDir = Path.Combine(root, ".queue");
@@ -19,9 +19,10 @@ public sealed class FileRunLockTests
 
         var acquired = await runLock.TryAcquireAsync(project, CancellationToken.None);
 
-        Assert.False(acquired.Acquired);
-        Assert.True(acquired.ExistingLock!.IsStale);
+        Assert.True(acquired.Acquired);
+        Assert.Null(acquired.ExistingLock);
         Assert.True(File.Exists(Path.Combine(stateDir, "lock")));
+        await acquired.Releaser!.DisposeAsync();
     }
 
     [Fact]

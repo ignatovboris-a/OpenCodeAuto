@@ -27,7 +27,7 @@ public sealed class JsonAppConfigStoreTests
 
         Assert.NotNull(config);
         Assert.Equal(2, config.Projects.Count);
-        Assert.Equal("project-b", config.GetActiveProjectOrThrow().Id);
+        Assert.Equal("project-b", config.ActiveProjectId!.Value.Value);
     }
 
     [Fact]
@@ -118,6 +118,50 @@ public sealed class JsonAppConfigStoreTests
     }
 
     [Fact]
+    public async Task LoadAsync_AppliesDefaultsToProjectsAndAllowsProjectOverrides()
+    {
+        var root = CreateTempRoot();
+        var configPath = Path.Combine(root, "opencode-queue.json");
+        Directory.CreateDirectory(root);
+        await File.WriteAllTextAsync(configPath, """
+            {
+              "schemaVersion": 1,
+              "defaults": {
+                "openCodeExecutable": "custom-opencode",
+                "serverUrl": "http://127.0.0.1:5000",
+                "manageOpenCodeServer": false,
+                "promptTransport": "FileAttachment",
+                "maxInlinePromptChars": 12000
+              },
+              "projects": [
+                { "id": "project-a", "projectDir": "target-a" },
+                {
+                  "id": "project-b",
+                  "projectDir": "target-b",
+                  "openCodeOverrides": {
+                    "serverUrl": "http://127.0.0.1:5001"
+                  }
+                }
+              ]
+            }
+            """);
+
+        var projects = (await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None))!.Projects;
+        var projectA = projects.Single(project => project.Id.Value == "project-a");
+        var projectB = projects.Single(project => project.Id.Value == "project-b");
+
+        Assert.Equal("custom-opencode", projectA.OpenCodeOverrides.OpenCodeExecutable);
+        Assert.Equal("http://127.0.0.1:5000", projectA.OpenCodeOverrides.ServerUrl);
+        Assert.False(projectA.OpenCodeOverrides.ManageOpenCodeServer);
+        Assert.Equal(PromptTransport.FileAttachment, projectA.OpenCodeOverrides.PromptTransport);
+        Assert.Equal(12000, projectA.OpenCodeOverrides.MaxInlinePromptChars);
+
+        Assert.Equal("custom-opencode", projectB.OpenCodeOverrides.OpenCodeExecutable);
+        Assert.Equal("http://127.0.0.1:5001", projectB.OpenCodeOverrides.ServerUrl);
+        Assert.False(projectB.OpenCodeOverrides.ManageOpenCodeServer);
+    }
+
+    [Fact]
     public async Task LoadOrCreateDefaultAsync_ReturnsEmptyRegistryWhenConfigDoesNotExist()
     {
         var configPath = Path.Combine(CreateTempRoot(), "missing", "opencode-queue.json");
@@ -140,11 +184,33 @@ public sealed class JsonAppConfigStoreTests
     }
 
     [Fact]
-    public void GetActiveProjectOrThrow_WhenNotSelected_ReturnsRussianError()
+    public async Task SaveAsync_PreservesUnchangedProjectRelativePaths()
     {
-        var exception = Assert.Throws<InvalidOperationException>(() => new AppConfig().GetActiveProjectOrThrow());
+        var root = CreateTempRoot();
+        var configPath = Path.Combine(root, "opencode-queue.json");
+        Directory.CreateDirectory(root);
+        await File.WriteAllTextAsync(configPath, """
+            {
+              "schemaVersion": 1,
+              "activeProjectId": "project-a",
+              "projects": [
+                { "id": "project-a", "projectDir": "projects/a", "promptsDir": "prompts", "qualityDir": "quality", "stateDir": ".queue" },
+                { "id": "project-b", "projectDir": "projects/b", "promptsDir": "prompts", "qualityDir": "quality", "stateDir": ".queue" }
+              ]
+            }
+            """);
+        var store = new JsonAppConfigStore();
+        var config = await store.LoadAsync(configPath, CancellationToken.None);
 
-        Assert.Equal("Активный проект не выбран.", exception.Message);
+        await store.SaveAsync(configPath, config! with { ActiveProjectId = "project-b" }, CancellationToken.None);
+
+        var saved = await File.ReadAllTextAsync(configPath);
+        var reloaded = await store.LoadAsync(configPath, CancellationToken.None);
+
+        Assert.Equal("project-b", reloaded!.ActiveProjectId!.Value.Value);
+        Assert.Contains("\"projectDir\": \"projects/a\"", saved, StringComparison.Ordinal);
+        Assert.Contains("\"projectDir\": \"projects/b\"", saved, StringComparison.Ordinal);
+        Assert.DoesNotContain(Path.Combine(root, "projects", "a"), saved, StringComparison.Ordinal);
     }
 
     [Fact]

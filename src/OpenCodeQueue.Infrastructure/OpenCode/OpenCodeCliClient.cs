@@ -3,14 +3,13 @@ using OpenCodeQueue.Core.Configuration;
 using OpenCodeQueue.Core.OpenCode;
 using OpenCodeQueue.Core.Ports;
 using OpenCodeQueue.Core.State;
+using OpenCodeQueue.Infrastructure.Files;
 using OpenCodeQueue.Infrastructure.Json;
 
 namespace OpenCodeQueue.Infrastructure.OpenCode;
 
 public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeClient
 {
-    private const string AttachmentInstruction = "Выполни инструкции из прикреплённого Markdown-файла.";
-
     public Task EnsureReadyAsync(ProjectProfile project, CancellationToken cancellationToken)
     {
         if (!Directory.Exists(project.ProjectDir))
@@ -92,18 +91,11 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
             return new StepRecoveryResult(StepRecoveryOutcome.Failed, "CLI fallback не продолжает recovery без сохранённого sessionId. Run требует ручного вмешательства.");
         }
 
-        var recoveryPayload = new PromptPayload
-        {
-            MessageId = string.IsNullOrWhiteSpace(step.SessionMessageId) ? $"recover-{Guid.NewGuid():N}" : $"{step.SessionMessageId}-recover",
-            SourcePath = step.SourcePath,
-            Transport = PromptTransport.Inline,
-            RunId = manifest.RunId,
-            StepId = step.Id.Value,
-            Content = "Консервативное восстановление OpenCodeQueue для CLI fallback: проверь предыдущий незавершённый шаг в этой session. Если исходный prompt уже выполнен, кратко сообщи результат и не повторяй опасные действия. Если выполнение не начиналось или прервалось, продолжи его с учётом уже видимого контекста session."
-        };
+        var recoveryId = string.IsNullOrWhiteSpace(step.SessionMessageId) ? $"recover-{Guid.NewGuid():N}" : $"{step.SessionMessageId}-recover";
+        var recoveryPayload = OpenCodePrompt.RecoveryPayload(recoveryId, step.SourcePath, manifest.RunId, step.Id.Value);
         var result = await SendPromptAsync(project, manifest.SessionId, recoveryPayload, cancellationToken);
         return result.IsSuccess
-            ? new StepRecoveryResult(StepRecoveryOutcome.ConservativeContinueSent, "CLI fallback отправил ConservativeContinue recovery prompt в конкретную session.")
+            ? new StepRecoveryResult(StepRecoveryOutcome.ConservativeContinueSent, "CLI fallback отправил ConservativeContinue recovery prompt в конкретную session.", result.MessageId ?? recoveryId)
             : new StepRecoveryResult(StepRecoveryOutcome.Failed, result.ErrorMessage ?? "CLI fallback recovery prompt завершился ошибкой.");
     }
 
@@ -143,11 +135,7 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
 
     private static void AddPromptArguments(List<string> arguments, PromptPayload payload)
     {
-        var transport = payload.Transport == PromptTransport.Auto
-            ? payload.Content.Length <= payload.MaxInlinePromptChars ? PromptTransport.Inline : PromptTransport.FileAttachment
-            : payload.Transport;
-
-        if (transport == PromptTransport.FileAttachment)
+        if (payload.Transport != PromptTransport.Inline)
         {
             if (!File.Exists(payload.SourcePath))
             {
@@ -156,7 +144,7 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
 
             arguments.Add("--file");
             arguments.Add(payload.SourcePath);
-            arguments.Add(AttachmentInstruction);
+            arguments.Add(OpenCodePrompt.CliAttachmentInstruction);
             return;
         }
 
@@ -281,13 +269,7 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
             return null;
         }
 
-        return Path.Combine(ProjectPaths.RunDir(project, runId), "logs", $"{SanitizeFileName(stepId)}.{stream}.log");
-    }
-
-    private static string SanitizeFileName(string value)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        return new string(value.Select(character => invalid.Contains(character) ? '_' : character).ToArray());
+        return Path.Combine(ProjectPaths.RunDir(project, runId), "logs", $"{FileNameSanitizer.Sanitize(stepId)}.{stream}.log");
     }
 
     private static string ExtractJson(string text)
