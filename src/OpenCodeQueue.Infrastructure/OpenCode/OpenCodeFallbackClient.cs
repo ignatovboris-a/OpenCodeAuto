@@ -20,8 +20,6 @@ public sealed class OpenCodeFallbackClient(IOpenCodeClient serverClient, IOpenCo
 
     public Task<OpenCodeSessionStatus> GetSessionStatusAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken) => SelectPinnedAsync(project, client => client.GetSessionStatusAsync(project, sessionId, cancellationToken));
 
-    public Task<StepRecoveryResult> TryRecoverStepAsync(ProjectProfile project, RunManifest manifest, WorkflowStep step, CancellationToken cancellationToken) => SelectPinnedAsync(project, client => client.TryRecoverStepAsync(project, manifest, step, cancellationToken));
-
     public Task AbortSessionAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken) => SelectPinnedAsync(project, client => client.AbortSessionAsync(project, sessionId, cancellationToken));
 
     private Task SelectPinnedAsync(ProjectProfile project, Func<IOpenCodeClient, Task> action)

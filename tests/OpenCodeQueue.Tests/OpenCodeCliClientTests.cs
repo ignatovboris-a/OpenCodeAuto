@@ -1,5 +1,6 @@
 using OpenCodeQueue.Core.Configuration;
 using OpenCodeQueue.Core.OpenCode;
+using OpenCodeQueue.Core.State;
 using OpenCodeQueue.Infrastructure.OpenCode;
 
 namespace OpenCodeQueue.Tests;
@@ -30,8 +31,8 @@ public sealed class OpenCodeCliClientTests
         Assert.Equal("opencode-test", request.Executable);
         Assert.Equal(new[] { "run", "--dir", root, "--session", "ses-1", "--format", "json", content }, request.Arguments);
         Assert.DoesNotContain("--continue", request.Arguments);
-        Assert.True(File.Exists(Path.Combine(root, ".queue", "runs", "run-1", "logs", "task.stdout.log")));
-        Assert.True(File.Exists(Path.Combine(root, ".queue", "runs", "run-1", "logs", "task.stderr.log")));
+        Assert.True(File.Exists(Path.Combine(root, ".queue", "runs", "run-1", "attempts", "msg-1.stdout.log")));
+        Assert.True(File.Exists(Path.Combine(root, ".queue", "runs", "run-1", "attempts", "msg-1.stderr.log")));
     }
 
     [Fact]
@@ -62,6 +63,31 @@ public sealed class OpenCodeCliClientTests
     }
 
     [Fact]
+    public async Task SendPromptAsync_Auto_UsesAttachmentToKeepPromptOutOfCommandLine()
+    {
+        var root = NewProjectDir();
+        var source = Path.Combine(root, "prompts", "01.md");
+        Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+        await File.WriteAllTextAsync(source, "small prompt", CancellationToken.None);
+        var runner = new FakeProcessRunner(new ProcessRunResult(0, "{}", string.Empty));
+        var client = new OpenCodeCliClient(runner);
+
+        await client.SendPromptAsync(Project(root), "ses-1", new PromptPayload
+        {
+            Content = "small prompt",
+            SourcePath = source,
+            MessageId = "msg-1",
+            Transport = PromptTransport.Auto,
+            MaxInlinePromptChars = 24000
+        }, CancellationToken.None);
+
+        var request = Assert.Single(runner.Requests);
+        Assert.Contains("--file", request.Arguments);
+        Assert.Contains(source, request.Arguments);
+        Assert.DoesNotContain("small prompt", request.Arguments);
+    }
+
+    [Fact]
     public async Task SendPromptAsync_DoesNotWriteFullPromptTextToLogFiles()
     {
         var root = NewProjectDir();
@@ -79,8 +105,8 @@ public sealed class OpenCodeCliClientTests
             StepId = "task"
         }, CancellationToken.None);
 
-        var stdout = await File.ReadAllTextAsync(Path.Combine(root, ".queue", "runs", "run-1", "logs", "task.stdout.log"));
-        var stderr = await File.ReadAllTextAsync(Path.Combine(root, ".queue", "runs", "run-1", "logs", "task.stderr.log"));
+        var stdout = await File.ReadAllTextAsync(Path.Combine(root, ".queue", "runs", "run-1", "attempts", "msg-1.stdout.log"));
+        var stderr = await File.ReadAllTextAsync(Path.Combine(root, ".queue", "runs", "run-1", "attempts", "msg-1.stderr.log"));
         Assert.DoesNotContain(prompt, stdout);
         Assert.DoesNotContain(prompt, stderr);
     }

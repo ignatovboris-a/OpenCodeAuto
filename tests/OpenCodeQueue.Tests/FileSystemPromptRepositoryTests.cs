@@ -239,4 +239,24 @@ public sealed class FileSystemPromptRepositoryTests
         Assert.DoesNotContain(result.Warnings, warning => warning.Contains("_01-draft.md", StringComparison.Ordinal));
         Assert.Contains(result.Warnings, warning => warning.Contains("_01-review.md", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public async Task DiscoverAsync_UsesExplicitDirectoryEvenWhenItsNameLooksInternal()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
+        var completed = Path.Combine(root, "completed");
+        Directory.CreateDirectory(completed);
+        await File.WriteAllTextAsync(Path.Combine(completed, "01-task.md"), "task");
+
+        var result = await new FileSystemPromptRepository().DiscoverAsync(new ProjectProfile
+        {
+            Id = "test",
+            ProjectDir = root,
+            PromptsDir = completed,
+            QualityDir = completed
+        }, CancellationToken.None);
+
+        Assert.Equal("01-task.md", Assert.Single(result.TaskPrompts).FileName);
+        Assert.Equal("01-task.md", Assert.Single(result.QualityPrompts).FileName);
+    }
 }

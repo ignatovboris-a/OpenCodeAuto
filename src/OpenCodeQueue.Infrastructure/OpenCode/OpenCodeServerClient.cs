@@ -104,7 +104,7 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
 
         if (HasCompletedAssistantResponse(document.RootElement))
         {
-            return new OpenCodeMessageResult(true, messageId, true);
+            return new OpenCodeMessageResult(true, messageId, true, LastAssistantText: ReadMessageText(document.RootElement));
         }
 
         return await WaitForAssistantResponseAsync(project, sessionId, messageId, cancellationToken);
@@ -120,53 +120,6 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         }
 
         return ReadStatus(statusElement);
-    }
-
-    public async Task<StepRecoveryResult> TryRecoverStepAsync(ProjectProfile project, RunManifest manifest, WorkflowStep step, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(manifest.SessionId))
-        {
-            return new StepRecoveryResult(StepRecoveryOutcome.NotFound, "В manifest нет sessionId.");
-        }
-
-        var details = await GetSessionAsync(project, manifest.SessionId, cancellationToken);
-        var messageId = step.SessionMessageId;
-        if (!string.IsNullOrWhiteSpace(step.RecoveryMessageId))
-        {
-            var recoveryMessage = details.Messages.FirstOrDefault(item => string.Equals(item.Id, step.RecoveryMessageId, StringComparison.Ordinal));
-            if (recoveryMessage?.IsFailed == true)
-            {
-                return new StepRecoveryResult(StepRecoveryOutcome.Failed, recoveryMessage.ErrorMessage ?? "OpenCode сообщил об ошибке recovery message.", step.RecoveryMessageId);
-            }
-
-            if (details.Messages.Any(item => item.Role == "assistant" && item.IsCompleted && string.Equals(item.ParentId, step.RecoveryMessageId, StringComparison.Ordinal)))
-            {
-                return new StepRecoveryResult(StepRecoveryOutcome.Completed, "Recovery prompt найден в session и имеет завершённый ответ assistant.", step.RecoveryMessageId);
-            }
-
-            return new StepRecoveryResult(StepRecoveryOutcome.ConservativeContinueSent, "Recovery prompt уже был отправлен ранее; повторная отправка не выполнялась.", step.RecoveryMessageId);
-        }
-
-        if (!string.IsNullOrWhiteSpace(messageId))
-        {
-            var message = details.Messages.FirstOrDefault(item => string.Equals(item.Id, messageId, StringComparison.Ordinal));
-            if (message is not null && message.IsFailed)
-            {
-                return new StepRecoveryResult(StepRecoveryOutcome.Failed, message.ErrorMessage ?? "OpenCode сообщил об ошибке message.");
-            }
-
-            if (message is not null && details.Messages.Any(item => item.Role == "assistant" && item.IsCompleted && string.Equals(item.ParentId, messageId, StringComparison.Ordinal)))
-            {
-                return new StepRecoveryResult(StepRecoveryOutcome.Completed, "Шаг найден в session и имеет завершённый ответ assistant.");
-            }
-        }
-
-        var recoveryId = string.IsNullOrWhiteSpace(messageId) ? $"recover-{Guid.NewGuid():N}" : $"{messageId}-recover";
-        var recoveryPayload = OpenCodePrompt.RecoveryPayload(recoveryId, step.SourcePath, manifest.RunId, step.Id.Value);
-        var result = await SendPromptAsync(project, manifest.SessionId, recoveryPayload, cancellationToken);
-        return result.IsSuccess
-            ? new StepRecoveryResult(StepRecoveryOutcome.ConservativeContinueSent, "Отправлен ConservativeContinue recovery prompt; исходный prompt повторно не отправлялся.", result.MessageId ?? recoveryId)
-            : new StepRecoveryResult(StepRecoveryOutcome.Failed, result.ErrorMessage ?? "Не удалось отправить recovery prompt.");
     }
 
     public async Task AbortSessionAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
@@ -339,12 +292,23 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
 
     private async Task<OpenCodeMessageResult> WaitForAssistantResponseAsync(ProjectProfile project, string sessionId, string messageId, CancellationToken cancellationToken)
     {
-        var deadline = DateTimeOffset.UtcNow.AddHours(6);
+        var resilience = project.OpenCodeOverrides.Resilience;
+        var deadline = DateTimeOffset.UtcNow.AddMinutes(Math.Max(1, resilience.StepTimeoutMinutes));
+        var idleDeadline = TimeSpan.FromMinutes(Math.Max(1, resilience.IdleTimeoutMinutes));
+        var lastProgressAt = DateTimeOffset.UtcNow;
+        var lastProgressSignature = string.Empty;
         while (DateTimeOffset.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var status = await GetSessionStatusAsync(project, sessionId, cancellationToken);
             var messages = await GetMessagesAsync(project, sessionId, cancellationToken);
+            var progressSignature = BuildProgressSignature(status, messages);
+            if (!string.Equals(progressSignature, lastProgressSignature, StringComparison.Ordinal))
+            {
+                lastProgressSignature = progressSignature;
+                lastProgressAt = DateTimeOffset.UtcNow;
+            }
+
             var userMessage = messages.FirstOrDefault(item => string.Equals(item.Id, messageId, StringComparison.Ordinal));
             if (userMessage?.IsFailed == true)
             {
@@ -354,12 +318,12 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
             var assistant = messages.FirstOrDefault(item => item.Role == "assistant" && string.Equals(item.ParentId, messageId, StringComparison.Ordinal));
             if (assistant?.IsFailed == true)
             {
-                return new OpenCodeMessageResult(false, messageId, false, assistant.ErrorMessage ?? "Assistant response завершился ошибкой.");
+                return new OpenCodeMessageResult(false, messageId, false, assistant.ErrorMessage ?? "Assistant response завершился ошибкой.", LastAssistantText: assistant.Text);
             }
 
             if (assistant?.IsCompleted == true)
             {
-                return new OpenCodeMessageResult(true, messageId, true);
+                return new OpenCodeMessageResult(true, messageId, true, LastAssistantText: assistant.Text);
             }
 
             if (status.State is OpenCodeSessionState.Failed or OpenCodeSessionState.Aborted)
@@ -367,10 +331,21 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
                 return new OpenCodeMessageResult(false, messageId, false, status.Message ?? $"OpenCode session перешла в статус {status.State}.");
             }
 
+            if (DateTimeOffset.UtcNow - lastProgressAt >= idleDeadline)
+            {
+                return new OpenCodeMessageResult(false, messageId, false, $"Idle timeout: OpenCode не присылал новых событий или сообщений {resilience.IdleTimeoutMinutes} минут.", IsTimeout: true, FinishedAt: DateTimeOffset.UtcNow);
+            }
+
             await Task.Delay(1000, cancellationToken);
         }
 
-        return new OpenCodeMessageResult(false, messageId, false, "Timeout ожидания завершённого assistant response от OpenCode server.");
+        return new OpenCodeMessageResult(false, messageId, false, "Timeout ожидания завершённого assistant response от OpenCode server.", IsTimeout: true, FinishedAt: DateTimeOffset.UtcNow);
+    }
+
+    private static string BuildProgressSignature(OpenCodeSessionStatus status, IReadOnlyList<OpenCodeMessage> messages)
+    {
+        var lastMessage = messages.LastOrDefault();
+        return string.Join('|', status.State, status.Message, messages.Count, lastMessage?.Id, lastMessage?.IsCompleted, lastMessage?.IsFailed, lastMessage?.ErrorMessage);
     }
 
     private async Task<IReadOnlyList<OpenCodeMessage>> GetMessagesAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
@@ -395,7 +370,7 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
             var failed = TryReadError(info, out var error);
             var parentId = ReadString(info, "parentID");
             var completed = role != "assistant" || (info.TryGetProperty("time", out var time) && time.TryGetProperty("completed", out _));
-            messages.Add(new OpenCodeMessage(id, role, completed, failed, parentId, error));
+            messages.Add(new OpenCodeMessage(id, role, completed, failed, parentId, error, ReadMessageText(item)));
         }
 
         return messages;
@@ -445,6 +420,32 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         }
 
         return false;
+    }
+
+    private static string? ReadMessageText(JsonElement messageElement)
+    {
+        if (!messageElement.TryGetProperty("parts", out var parts) || parts.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var builder = new StringBuilder();
+        foreach (var part in parts.EnumerateArray())
+        {
+            var type = ReadString(part, "type");
+            if (!string.Equals(type, "text", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var text = ReadString(part, "text");
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                builder.AppendLine(text);
+            }
+        }
+
+        return builder.Length == 0 ? null : builder.ToString().TrimEnd();
     }
 
     private static string ReadRequiredString(JsonElement element, string propertyName, string description)

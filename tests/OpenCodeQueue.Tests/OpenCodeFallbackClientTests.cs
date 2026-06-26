@@ -118,11 +118,6 @@ public sealed class OpenCodeFallbackClientTests
             return Task.FromResult(new OpenCodeSessionStatus(OpenCodeSessionState.Unknown));
         }
 
-        public Task<StepRecoveryResult> TryRecoverStepAsync(ProjectProfile project, RunManifest manifest, WorkflowStep step, CancellationToken cancellationToken)
-        {
-            return Task.FromResult(new StepRecoveryResult(StepRecoveryOutcome.NotFound));
-        }
-
         public Task AbortSessionAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
         {
             return Task.CompletedTask;

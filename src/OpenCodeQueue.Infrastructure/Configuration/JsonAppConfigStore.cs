@@ -216,7 +216,8 @@ public sealed class JsonAppConfigStore(IClock? clock = null) : IAppConfigStore
             Agent = Has(overridesElement, "agent") ? overrides.Agent : defaults.Agent,
             PromptTransport = Has(overridesElement, "promptTransport") ? overrides.PromptTransport : defaults.PromptTransport,
             MaxInlinePromptChars = Has(overridesElement, "maxInlinePromptChars") ? overrides.MaxInlinePromptChars : defaults.MaxInlinePromptChars,
-            ConsoleVerbosity = Has(overridesElement, "consoleVerbosity") ? overrides.ConsoleVerbosity : defaults.ConsoleVerbosity
+            ConsoleVerbosity = Has(overridesElement, "consoleVerbosity") ? overrides.ConsoleVerbosity : defaults.ConsoleVerbosity,
+            Resilience = Has(overridesElement, "resilience") ? overrides.Resilience : defaults.Resilience
         };
     }
 

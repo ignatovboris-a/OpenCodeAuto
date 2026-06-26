@@ -17,9 +17,34 @@ public enum OpenCodeSessionState
 
 public sealed record OpenCodeSessionStatus(OpenCodeSessionState State, string? Message = null);
 
-public sealed record OpenCodeMessageResult(bool IsSuccess, string? MessageId = null, bool HasAssistantResponse = false, string? ErrorMessage = null);
+public enum OpenCodeStepOutcomeKind
+{
+    Completed,
+    RecoverableInterruption,
+    NeedsManualIntervention,
+    FatalFailure
+}
 
-public sealed record OpenCodeMessage(string Id, string Role, bool IsCompleted, bool IsFailed, string? ParentId = null, string? ErrorMessage = null);
+public sealed record OpenCodeMessageResult(
+    bool IsSuccess,
+    string? MessageId = null,
+    bool HasAssistantResponse = false,
+    string? ErrorMessage = null,
+    int? ExitCode = null,
+    string? Stdout = null,
+    string? Stderr = null,
+    string? LastAssistantText = null,
+    bool IsTransportError = false,
+    bool IsTimeout = false,
+    DateTimeOffset? StartedAt = null,
+    DateTimeOffset? FinishedAt = null,
+    string? StdoutLogPath = null,
+    string? StderrLogPath = null,
+    string? MessageLogPath = null);
+
+public sealed record StepClassification(OpenCodeStepOutcomeKind Kind, string? Signature = null, string? Message = null);
+
+public sealed record OpenCodeMessage(string Id, string Role, bool IsCompleted, bool IsFailed, string? ParentId = null, string? ErrorMessage = null, string? Text = null);
 
 public sealed record OpenCodeSessionDetails(OpenCodeSession Session, OpenCodeSessionStatus Status, IReadOnlyList<OpenCodeMessage> Messages);
 
@@ -39,16 +64,6 @@ public sealed record PromptPayload
 
     public string? StepId { get; init; }
 }
-
-public enum StepRecoveryOutcome
-{
-    Completed,
-    Failed,
-    ConservativeContinueSent,
-    NotFound
-}
-
-public sealed record StepRecoveryResult(StepRecoveryOutcome Outcome, string? Message = null, string? MessageId = null);
 
 public class OpenCodeClientException : Exception
 {

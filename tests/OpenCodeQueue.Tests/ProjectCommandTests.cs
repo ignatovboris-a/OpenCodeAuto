@@ -233,7 +233,7 @@ public sealed class ProjectCommandTests
         var state = new JsonStateStore();
         var runLock = new FileRunLock();
         openCodeClient ??= new FakeOpenCodeClient();
-        var queueUseCases = new QueueUseCases(registry, prompts, state, runLock, openCodeClient, new RunWorkspace(), new FileSystemArchiver(), new SystemClock());
+        var queueUseCases = new QueueUseCases(registry, prompts, state, runLock, openCodeClient, new RunWorkspace(), new FileSystemArchiver(), new SystemClock(), new OpenCodeStepResultClassifier());
         var discovery = new CompositeProjectDiscoveryService(configStore);
         var projectPrompt = new ProjectProfilePrompt(reporter);
         var presenter = new ProjectConsolePresenter(reporter);
@@ -300,11 +300,6 @@ public sealed class ProjectCommandTests
         public Task<OpenCodeSessionStatus> GetSessionStatusAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
         {
             return Task.FromResult(new OpenCodeSessionStatus(OpenCodeSessionState.Idle));
-        }
-
-        public Task<StepRecoveryResult> TryRecoverStepAsync(ProjectProfile project, RunManifest manifest, WorkflowStep step, CancellationToken cancellationToken)
-        {
-            return Task.FromResult(new StepRecoveryResult(StepRecoveryOutcome.Completed));
         }
 
         public Task AbortSessionAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken) => Task.CompletedTask;

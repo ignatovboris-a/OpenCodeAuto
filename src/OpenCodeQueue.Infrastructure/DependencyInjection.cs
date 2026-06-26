@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using OpenCodeQueue.Core.OpenCode;
 using OpenCodeQueue.Core.Ports;
 using OpenCodeQueue.Core.Workflow;
 using OpenCodeQueue.Infrastructure.Configuration;
@@ -32,6 +33,7 @@ public static class DependencyInjection
         services.AddSingleton<IRunWorkspace, RunWorkspace>();
         services.AddSingleton<IFileArchiver, FileSystemArchiver>();
         services.AddSingleton<IClock, SystemClock>();
+        services.AddSingleton<IOpenCodeRunClassifier, OpenCodeStepResultClassifier>();
         services.AddSingleton<IQueueUseCases, QueueUseCases>();
         return services;
     }

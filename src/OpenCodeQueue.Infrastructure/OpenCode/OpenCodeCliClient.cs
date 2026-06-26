@@ -69,34 +69,23 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
         arguments.Add("json");
         AddPromptArguments(arguments, payload);
 
-        var result = await RunCliAsync(project, arguments, payload.RunId, payload.StepId ?? payload.MessageId, cancellationToken);
+        var startedAt = DateTimeOffset.UtcNow;
+        var result = await RunCliAsync(project, arguments, payload.RunId, payload.MessageId, cancellationToken);
+        var finishedAt = DateTimeOffset.UtcNow;
+        var stdoutPath = TryGetLogPath(project, payload.RunId, payload.MessageId, "stdout");
+        var stderrPath = TryGetLogPath(project, payload.RunId, payload.MessageId, "stderr");
         if (result.ExitCode != 0)
         {
-            return new OpenCodeMessageResult(false, payload.MessageId, false, $"OpenCode CLI завершился с кодом {result.ExitCode}.");
+            return new OpenCodeMessageResult(false, payload.MessageId, false, $"OpenCode CLI завершился с кодом {result.ExitCode}.", result.ExitCode, result.StandardOutput, result.StandardError, StartedAt: startedAt, FinishedAt: finishedAt, StdoutLogPath: stdoutPath, StderrLogPath: stderrPath);
         }
 
         var messageId = TryReadMessageId(result.StandardOutput) ?? payload.MessageId;
-        return new OpenCodeMessageResult(true, messageId, true);
+        return new OpenCodeMessageResult(true, messageId, true, ExitCode: result.ExitCode, Stdout: result.StandardOutput, Stderr: result.StandardError, StartedAt: startedAt, FinishedAt: finishedAt, StdoutLogPath: stdoutPath, StderrLogPath: stderrPath);
     }
 
     public Task<OpenCodeSessionStatus> GetSessionStatusAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
     {
         return Task.FromResult(new OpenCodeSessionStatus(OpenCodeSessionState.Unknown, "CLI fallback не может доказуемо определить status session."));
-    }
-
-    public async Task<StepRecoveryResult> TryRecoverStepAsync(ProjectProfile project, RunManifest manifest, WorkflowStep step, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(manifest.SessionId))
-        {
-            return new StepRecoveryResult(StepRecoveryOutcome.Failed, "CLI fallback не продолжает recovery без сохранённого sessionId. Run требует ручного вмешательства.");
-        }
-
-        var recoveryId = string.IsNullOrWhiteSpace(step.SessionMessageId) ? $"recover-{Guid.NewGuid():N}" : $"{step.SessionMessageId}-recover";
-        var recoveryPayload = OpenCodePrompt.RecoveryPayload(recoveryId, step.SourcePath, manifest.RunId, step.Id.Value);
-        var result = await SendPromptAsync(project, manifest.SessionId, recoveryPayload, cancellationToken);
-        return result.IsSuccess
-            ? new StepRecoveryResult(StepRecoveryOutcome.ConservativeContinueSent, "CLI fallback отправил ConservativeContinue recovery prompt в конкретную session.", result.MessageId ?? recoveryId)
-            : new StepRecoveryResult(StepRecoveryOutcome.Failed, result.ErrorMessage ?? "CLI fallback recovery prompt завершился ошибкой.");
     }
 
     public Task AbortSessionAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
@@ -125,7 +114,7 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
             Executable = project.OpenCodeOverrides.OpenCodeExecutable,
             WorkingDirectory = project.ProjectDir,
             Arguments = arguments,
-            Timeout = TimeSpan.FromHours(6),
+            Timeout = TimeSpan.FromMinutes(Math.Max(1, project.OpenCodeOverrides.Resilience.StepTimeoutMinutes)),
             OnStdoutLine = stdoutPath is null ? null : (line, token) => AppendLogLineAsync(stdoutPath, line, token),
             OnStderrLine = stderrPath is null ? null : (line, token) => AppendLogLineAsync(stderrPath, line, token)
         }, cancellationToken);
@@ -269,7 +258,7 @@ public sealed class OpenCodeCliClient(IProcessRunner processRunner) : IOpenCodeC
             return null;
         }
 
-        return Path.Combine(ProjectPaths.RunDir(project, runId), "logs", $"{FileNameSanitizer.Sanitize(stepId)}.{stream}.log");
+        return Path.Combine(ProjectPaths.RunDir(project, runId), "attempts", $"{FileNameSanitizer.Sanitize(stepId)}.{stream}.log");
     }
 
     private static string ExtractJson(string text)

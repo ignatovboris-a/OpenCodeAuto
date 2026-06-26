@@ -18,4 +18,14 @@ public sealed class RunWorkspace : IRunWorkspace
         await target.FlushAsync(cancellationToken);
         return destination;
     }
+
+    public async Task<string> WriteAttemptMessageAsync(ProjectProfile project, string runId, string messageId, string content, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var attemptsDir = Path.Combine(ProjectPaths.RunDir(project, runId), "attempts");
+        Directory.CreateDirectory(attemptsDir);
+        var destination = Path.Combine(attemptsDir, FileNameSanitizer.Sanitize(messageId) + ".message.md");
+        await File.WriteAllTextAsync(destination, content, cancellationToken);
+        return destination;
+    }
 }

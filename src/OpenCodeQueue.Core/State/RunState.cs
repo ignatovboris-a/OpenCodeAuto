@@ -32,6 +32,12 @@ public enum WorkflowStepStatus
     Skipped
 }
 
+public enum WorkflowStage
+{
+    Task,
+    Quality
+}
+
 public readonly record struct WorkflowStepId(string Value)
 {
     public override string ToString() => Value;
@@ -66,6 +72,43 @@ public sealed record WorkflowStep
     public DateTimeOffset? CompletedAt { get; init; }
 
     public int AttemptCount { get; init; }
+
+    public int ContinuationAttempts { get; init; }
+
+    public int TransportRetries { get; init; }
+
+    public string? LastInterruptionSignature { get; init; }
+
+    public int SameSignatureRepeatCount { get; init; }
+
+    public DateTimeOffset? LastProgressAt { get; init; }
+
+    public DateTimeOffset? NextRetryAt { get; init; }
+
+    public IReadOnlyList<StepAttemptLog> AttemptLogs { get; init; } = [];
+}
+
+public sealed record StepAttemptLog
+{
+    public required int AttemptNumber { get; init; }
+
+    public required bool IsContinuation { get; init; }
+
+    public string? MessageId { get; init; }
+
+    public string? Outcome { get; init; }
+
+    public string? Signature { get; init; }
+
+    public string? StdoutLogPath { get; init; }
+
+    public string? StderrLogPath { get; init; }
+
+    public string? MessageLogPath { get; init; }
+
+    public DateTimeOffset StartedAt { get; init; }
+
+    public DateTimeOffset FinishedAt { get; init; }
 }
 
 public sealed record RunManifest
@@ -97,6 +140,26 @@ public sealed record RunManifest
     public ArchiveStatus ArchiveStatus { get; init; } = ArchiveStatus.NotStarted;
 
     public int RecoveryAttempts { get; init; }
+
+    public WorkflowStage? CurrentStage { get; init; }
+
+    public string? CurrentPromptPath { get; init; }
+
+    public int? CurrentQualityIndex { get; init; }
+
+    public string? CurrentLogicalStepStatus { get; init; }
+
+    public int CurrentStepContinuationAttempts { get; init; }
+
+    public int CurrentStepTransportRetries { get; init; }
+
+    public string? LastInterruptionSignature { get; init; }
+
+    public int SameSignatureRepeatCount { get; init; }
+
+    public DateTimeOffset? LastProgressAt { get; init; }
+
+    public DateTimeOffset? NextRetryAt { get; init; }
 
     public DateTimeOffset CreatedAt { get; init; }
 
@@ -156,6 +219,13 @@ public static class QueueEventTypes
     public const string StepFailed = nameof(StepFailed);
     public const string RecoveryStarted = nameof(RecoveryStarted);
     public const string RecoveryCompleted = nameof(RecoveryCompleted);
+    public const string RecoverableInterruptionDetected = nameof(RecoverableInterruptionDetected);
+    public const string ContinuationPromptSent = nameof(ContinuationPromptSent);
+    public const string ContinuationAttemptCompleted = nameof(ContinuationAttemptCompleted);
+    public const string TransportRetryScheduled = nameof(TransportRetryScheduled);
+    public const string NeedsManualInterventionDetected = nameof(NeedsManualInterventionDetected);
+    public const string RecoveryLimitExceeded = nameof(RecoveryLimitExceeded);
+    public const string ActiveRunRecoveredAfterRestart = nameof(ActiveRunRecoveredAfterRestart);
     public const string TaskArchived = nameof(TaskArchived);
     public const string RunCompleted = nameof(RunCompleted);
     public const string RunAborted = nameof(RunAborted);

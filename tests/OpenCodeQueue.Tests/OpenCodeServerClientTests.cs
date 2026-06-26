@@ -176,6 +176,36 @@ public sealed class OpenCodeServerClientTests
     }
 
     [Fact]
+    public async Task SendPromptAsync_WhenAssistantTextIsReturned_ExposesLastAssistantText()
+    {
+        var root = NewProjectDir();
+        var project = ExternalProject(root) with { OpenCodeOverrides = ExternalProject(root).OpenCodeOverrides with { PromptTransport = PromptTransport.Inline } };
+        using var httpClient = new HttpClient(new FakeHandler(request => request.RequestUri!.AbsolutePath switch
+        {
+            "/global/health" => Json(new { healthy = true, version = "test" }),
+            "/path" => Json(new { worktree = root, directory = root }),
+            "/session/ses-1/message" when request.Method == HttpMethod.Post => Json(new
+            {
+                info = new { id = "msg-1", role = "assistant", time = new { created = 1, completed = 2 } },
+                parts = new object[] { new { type = "text", text = "NEEDS_MANUAL_INTERVENTION: нужен токен" } }
+            }),
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound)
+        }));
+        var client = new OpenCodeServerClient(httpClient, new FakeProcessFactory());
+
+        var result = await client.SendPromptAsync(project, "ses-1", new PromptPayload
+        {
+            Content = "prompt",
+            SourcePath = Path.Combine(root, "prompts", "01.md"),
+            MessageId = "msg-1",
+            Transport = PromptTransport.Inline
+        }, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Contains("NEEDS_MANUAL_INTERVENTION", result.LastAssistantText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task SendPromptAsync_AutoLargePrompt_UsesFileAttachmentWithoutPromptText()
     {
         var root = NewProjectDir();
@@ -217,124 +247,6 @@ public sealed class OpenCodeServerClientTests
         Assert.Equal("file", parts[1].GetProperty("type").GetString());
         Assert.DoesNotContain("1234567890", body!);
         Assert.Equal("01.md", parts[1].GetProperty("filename").GetString());
-    }
-
-    [Fact]
-    public async Task TryRecoverStepAsync_DoesNotCompleteFromUnrelatedAssistantMessage()
-    {
-        var root = NewProjectDir();
-        var project = ExternalProject(root);
-        var recoverySent = false;
-        using var httpClient = new HttpClient(new FakeHandler(async request =>
-        {
-            if (request.RequestUri!.AbsolutePath == "/session/ses-1/message" && request.Method == HttpMethod.Post)
-            {
-                var body = await request.Content!.ReadAsStringAsync();
-                recoverySent = body.Contains("msg-1-recover", StringComparison.Ordinal);
-                return Json(new { info = new { id = "msg-1-recover", role = "assistant", time = new { created = 3, completed = 4 } }, parts = Array.Empty<object>() });
-            }
-
-            return request.RequestUri!.AbsolutePath switch
-            {
-                "/global/health" => Json(new { healthy = true, version = "test" }),
-                "/path" => Json(new { worktree = root, directory = root }),
-                "/session/ses-1" => Json(new { id = "ses-1", directory = root, title = "test" }),
-                "/session/status" => Json(new Dictionary<string, object> { ["ses-1"] = new { type = "idle" } }),
-                "/session/ses-1/message" => Json(new object[]
-                {
-                    new { info = new { id = "msg-1", role = "user", time = new { created = 1 } } },
-                    new { info = new { id = "assistant-old", role = "assistant", parentID = "other", time = new { created = 1, completed = 2 } } }
-                }),
-                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
-            };
-        }));
-        var client = new OpenCodeServerClient(httpClient, new FakeProcessFactory());
-        var manifest = new RunManifest
-        {
-            RunId = "run-1",
-            ProjectId = project.Id,
-            SessionId = "ses-1",
-            ProjectDirSnapshot = root
-        };
-        var step = new WorkflowStep
-        {
-            Id = WorkflowStepId.Task,
-            Kind = PromptKind.Task,
-            SourcePath = Path.Combine(root, "prompts", "01.md"),
-            SessionMessageId = "msg-1"
-        };
-
-        var result = await client.TryRecoverStepAsync(project, manifest, step, CancellationToken.None);
-
-        Assert.Equal(StepRecoveryOutcome.ConservativeContinueSent, result.Outcome);
-        Assert.True(recoverySent);
-    }
-
-    [Fact]
-    public async Task TryRecoverStepAsync_WhenRecoveryPromptFails_ReturnsFailed()
-    {
-        var root = NewProjectDir();
-        var project = ExternalProject(root);
-        using var httpClient = new HttpClient(new FakeHandler(request =>
-        {
-            if (request.RequestUri!.AbsolutePath == "/session/ses-1/message" && request.Method == HttpMethod.Post)
-            {
-                return Task.FromResult(Json(new { info = new { id = "msg-1-recover", error = new { message = "recovery failed" } } }));
-            }
-
-            return Task.FromResult(request.RequestUri!.AbsolutePath switch
-            {
-                "/global/health" => Json(new { healthy = true, version = "test" }),
-                "/path" => Json(new { worktree = root, directory = root }),
-                "/session/ses-1" => Json(new { id = "ses-1", directory = root, title = "test" }),
-                "/session/status" => Json(new Dictionary<string, object> { ["ses-1"] = new { type = "idle" } }),
-                "/session/ses-1/message" => Json(new object[] { new { info = new { id = "msg-1", role = "user", time = new { created = 1 } } } }),
-                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
-            });
-        }));
-        var client = new OpenCodeServerClient(httpClient, new FakeProcessFactory());
-        var manifest = new RunManifest { RunId = "run-1", ProjectId = project.Id, SessionId = "ses-1", ProjectDirSnapshot = root };
-        var step = new WorkflowStep { Id = WorkflowStepId.Task, Kind = PromptKind.Task, SourcePath = Path.Combine(root, "prompts", "01.md"), SessionMessageId = "msg-1" };
-
-        var result = await client.TryRecoverStepAsync(project, manifest, step, CancellationToken.None);
-
-        Assert.Equal(StepRecoveryOutcome.Failed, result.Outcome);
-        Assert.Contains("recovery failed", result.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task TryRecoverStepAsync_WithExistingRecoveryMessage_DoesNotSendAnotherRecoveryPrompt()
-    {
-        var root = NewProjectDir();
-        var project = ExternalProject(root);
-        var postCount = 0;
-        using var httpClient = new HttpClient(new FakeHandler(request =>
-        {
-            if (request.RequestUri!.AbsolutePath == "/session/ses-1/message" && request.Method == HttpMethod.Post)
-            {
-                postCount++;
-                return Task.FromResult(Json(new { info = new { id = "unexpected" } }));
-            }
-
-            return Task.FromResult(request.RequestUri!.AbsolutePath switch
-            {
-                "/global/health" => Json(new { healthy = true, version = "test" }),
-                "/path" => Json(new { worktree = root, directory = root }),
-                "/session/ses-1" => Json(new { id = "ses-1", directory = root, title = "test" }),
-                "/session/status" => Json(new Dictionary<string, object> { ["ses-1"] = new { type = "idle" } }),
-                "/session/ses-1/message" => Json(new object[] { new { info = new { id = "msg-1-recover", role = "user", time = new { created = 1 } } } }),
-                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
-            });
-        }));
-        var client = new OpenCodeServerClient(httpClient, new FakeProcessFactory());
-        var manifest = new RunManifest { RunId = "run-1", ProjectId = project.Id, SessionId = "ses-1", ProjectDirSnapshot = root };
-        var step = new WorkflowStep { Id = WorkflowStepId.Task, Kind = PromptKind.Task, SourcePath = Path.Combine(root, "prompts", "01.md"), SessionMessageId = "msg-1", RecoveryMessageId = "msg-1-recover" };
-
-        var result = await client.TryRecoverStepAsync(project, manifest, step, CancellationToken.None);
-
-        Assert.Equal(StepRecoveryOutcome.ConservativeContinueSent, result.Outcome);
-        Assert.Equal("msg-1-recover", result.MessageId);
-        Assert.Equal(0, postCount);
     }
 
     private static ProjectProfile ManagedProject(string root)

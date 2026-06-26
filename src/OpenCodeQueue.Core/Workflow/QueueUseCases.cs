@@ -14,7 +14,9 @@ public sealed class QueueUseCases(
     IOpenCodeClient openCodeClient,
     IRunWorkspace runWorkspace,
     IFileArchiver fileArchiver,
-    IClock clock) : IQueueUseCases
+    IClock clock,
+    IOpenCodeRunClassifier classifier,
+    IConsoleReporter? reporter = null) : IQueueUseCases
 {
     public async Task<QueueOperationResult> RunQueueAsync(string configPath, string? projectId, bool once, CancellationToken cancellationToken)
     {
@@ -133,6 +135,7 @@ public sealed class QueueUseCases(
         }
 
         await AppendEventAsync(project, QueueEventTypes.RecoveryStarted, manifest.RunId, null, manifest.SessionId, null, "Resume active run", cancellationToken);
+        await AppendEventAsync(project, QueueEventTypes.ActiveRunRecoveredAfterRestart, manifest.RunId, null, manifest.SessionId, manifest.TaskDescriptor?.FileName, "Активный run найден после рестарта; новая задача не запускается.", cancellationToken);
         manifest = manifest with { RecoveryAttempts = manifest.RecoveryAttempts + 1, UpdatedAt = clock.Now };
         await stateStore.SaveRunManifestAsync(project, manifest, cancellationToken);
 
@@ -320,34 +323,37 @@ public sealed class QueueUseCases(
                     return await MarkManualAsync(project, manifest, "manifest не содержит sessionId для незавершённого running step; автоматическое восстановление остановлено, чтобы не повторить prompt в новой session.", cancellationToken);
                 }
 
-                StepRecoveryResult recovered;
+                var sessionId = manifest.SessionId;
+
                 try
                 {
-                    recovered = await openCodeClient.TryRecoverStepAsync(project, manifest, step, cancellationToken);
+                    await openCodeClient.GetSessionAsync(project, sessionId, cancellationToken);
                 }
                 catch (Exception exception) when (exception is OpenCodeClientException or IOException or InvalidOperationException or UnauthorizedAccessException)
                 {
-                    return await MarkRecoveryUnavailableAsync(project, manifest, "OpenCode недоступен во время recovery: " + exception.Message, cancellationToken);
+                    return await MarkManualAsync(project, manifest, "Сессия OpenCode недоступна или потеряна окончательно: " + exception.Message, cancellationToken);
                 }
 
-                if (recovered.Outcome == StepRecoveryOutcome.Completed)
+                var recoveryStep = step with { Status = WorkflowStepStatus.Recovering, LastProgressAt = clock.Now };
+                manifest = ReplaceStep(manifest, index, recoveryStep) with { CurrentStepIndex = index, CurrentLogicalStepStatus = recoveryStep.Status.ToString(), UpdatedAt = clock.Now };
+                await stateStore.SaveRunManifestAsync(project, manifest, cancellationToken);
+                await AppendEventAsync(project, QueueEventTypes.ActiveRunRecoveredAfterRestart, manifest.RunId, recoveryStep.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, $"Сессия восстановлена, продолжаю текущий {recoveryStep.Kind.ToString().ToLowerInvariant()} prompt: {Path.GetFileName(recoveryStep.SourcePath)}.", cancellationToken);
+                var continuationPayload = BuildContinuationPayload(manifest, recoveryStep);
+                manifest = await SendLogicalStepWithRecoveryAsync(project, manifest, index, sessionId, continuationPayload, isContinuation: true, cancellationToken);
+                if (manifest.Steps[index].Status == WorkflowStepStatus.Completed)
                 {
-                    manifest = await MarkStepCompletedAsync(project, manifest, index, step.SessionMessageId, cancellationToken);
                     continue;
                 }
 
-                if (recovered.Outcome == StepRecoveryOutcome.Failed)
-                {
-                    return await MarkStepFailedAsync(project, manifest, index, recovered.Message ?? "OpenCode сообщил об ошибке шага.", cancellationToken);
-                }
-
-                if (recovered.Outcome == StepRecoveryOutcome.ConservativeContinueSent)
-                {
-                    return await MarkRecoveryPendingAsync(project, manifest, index, recovered.Message ?? "Отправлен recovery prompt; исходный prompt повторно не отправлялся.", recovered.MessageId, cancellationToken);
-                }
+                return manifest;
             }
 
             manifest = await SendStepAsync(project, manifest, index, cancellationToken);
+            if (manifest.Status == RunStatus.NeedsManualIntervention)
+            {
+                return manifest;
+            }
+
             if (manifest.Status == RunStatus.Failed)
             {
                 if (step.Kind == PromptKind.Quality && !project.StopOnQualityFailure)
@@ -382,15 +388,26 @@ public sealed class QueueUseCases(
     private async Task<RunManifest> SendStepAsync(ProjectProfile project, RunManifest manifest, int stepIndex, CancellationToken cancellationToken)
     {
         var step = manifest.Steps[stepIndex];
-        var running = step with { Status = WorkflowStepStatus.Running, StartedAt = step.StartedAt ?? clock.Now, AttemptCount = step.AttemptCount + 1 };
-        manifest = ReplaceStep(manifest, stepIndex, running) with { CurrentStepIndex = stepIndex, Status = RunStatus.Running, UpdatedAt = clock.Now };
+        var running = step with { Status = WorkflowStepStatus.Running, StartedAt = step.StartedAt ?? clock.Now, AttemptCount = step.AttemptCount + 1, LastProgressAt = clock.Now };
+        manifest = ReplaceStep(manifest, stepIndex, running) with
+        {
+            CurrentStepIndex = stepIndex,
+            CurrentStage = running.Kind == PromptKind.Task ? WorkflowStage.Task : WorkflowStage.Quality,
+            CurrentPromptPath = running.SourcePath,
+            CurrentQualityIndex = running.Kind == PromptKind.Quality ? running.Order : null,
+            CurrentLogicalStepStatus = running.Status.ToString(),
+            CurrentStepContinuationAttempts = running.ContinuationAttempts,
+            CurrentStepTransportRetries = running.TransportRetries,
+            LastProgressAt = clock.Now,
+            Status = RunStatus.Running,
+            UpdatedAt = clock.Now
+        };
         await stateStore.SaveRunManifestAsync(project, manifest, cancellationToken);
         await AppendEventAsync(project, QueueEventTypes.StepStarted, manifest.RunId, running.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, null, cancellationToken);
 
         try
         {
             var payload = await BuildPayloadAsync(manifest, running, cancellationToken);
-            OpenCodeMessageResult result;
             string? sessionId = manifest.SessionId;
             if (string.IsNullOrWhiteSpace(sessionId))
             {
@@ -400,21 +417,11 @@ public sealed class QueueUseCases(
                 manifest = manifest with { SessionId = sessionId, UpdatedAt = clock.Now };
                 await stateStore.SaveRunManifestAsync(project, manifest, cancellationToken);
                 await AppendEventAsync(project, QueueEventTypes.SessionCreated, manifest.RunId, running.Id.Value, sessionId, manifest.TaskDescriptor?.FileName, null, cancellationToken);
-                result = await openCodeClient.SendPromptAsync(project, sessionId, payload, cancellationToken);
-            }
-            else
-            {
-                result = await openCodeClient.SendPromptAsync(project, sessionId, payload, cancellationToken);
             }
 
-            if (!result.IsSuccess)
-            {
-                return await MarkStepFailedAsync(project, manifest, stepIndex, result.ErrorMessage ?? "OpenCode не выполнил prompt успешно.", cancellationToken);
-            }
-
-            return await MarkStepCompletedAsync(project, manifest, stepIndex, result.MessageId, cancellationToken);
+            return await SendLogicalStepWithRecoveryAsync(project, manifest, stepIndex, sessionId, payload, isContinuation: false, cancellationToken);
         }
-        catch (Exception exception) when (exception is OpenCodeClientException or IOException or InvalidOperationException)
+        catch (Exception exception) when (exception is OpenCodeClientException or IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
         {
             return await MarkStepFailedAsync(project, manifest, stepIndex, exception.Message, cancellationToken);
         }
@@ -422,6 +429,222 @@ public sealed class QueueUseCases(
         {
             return await MarkStepFailedAsync(project, manifest, stepIndex, exception.Message, cancellationToken);
         }
+    }
+
+    private async Task<RunManifest> SendLogicalStepWithRecoveryAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string sessionId, PromptPayload payload, bool isContinuation, CancellationToken cancellationToken)
+    {
+        var resilience = manifest.OpenCodeSettingsSnapshot.Resilience;
+        var stepStartedAt = clock.Now;
+        var currentPayload = payload;
+        var continuation = isContinuation;
+
+        while (true)
+        {
+            OpenCodeMessageResult result;
+            var messageLogPath = await runWorkspace.WriteAttemptMessageAsync(project, manifest.RunId, currentPayload.MessageId, currentPayload.Content, cancellationToken);
+            try
+            {
+                result = await openCodeClient.SendPromptAsync(project, sessionId, currentPayload, cancellationToken);
+                result = result with { MessageLogPath = result.MessageLogPath ?? messageLogPath };
+            }
+            catch (OpenCodeClientException exception) when (IsLostSessionError(exception))
+            {
+                return await MarkManualAsync(project, manifest, "Сессия OpenCode потеряна окончательно: " + exception.Message, cancellationToken);
+            }
+            catch (OpenCodeClientException exception)
+            {
+                result = new OpenCodeMessageResult(false, currentPayload.MessageId, ErrorMessage: exception.Message, IsTransportError: IsRecoverableTransportException(exception), IsTimeout: IsTimeoutException(exception), StartedAt: clock.Now, FinishedAt: clock.Now, MessageLogPath: messageLogPath);
+            }
+            catch (System.ComponentModel.Win32Exception exception)
+            {
+                result = new OpenCodeMessageResult(false, currentPayload.MessageId, ErrorMessage: exception.Message, StartedAt: clock.Now, FinishedAt: clock.Now, MessageLogPath: messageLogPath);
+            }
+            catch (Exception exception) when (exception is IOException or TimeoutException or TaskCanceledException or InvalidOperationException)
+            {
+                result = new OpenCodeMessageResult(false, currentPayload.MessageId, ErrorMessage: exception.Message, IsTransportError: exception is IOException or TimeoutException or TaskCanceledException, IsTimeout: exception is TimeoutException or TaskCanceledException, StartedAt: clock.Now, FinishedAt: clock.Now, MessageLogPath: messageLogPath);
+            }
+
+            var classification = classifier.Classify(result, resilience);
+            manifest = await RecordAttemptAsync(project, manifest, stepIndex, result, classification, continuation, cancellationToken);
+            var step = manifest.Steps[stepIndex];
+
+            if (classification.Kind == OpenCodeStepOutcomeKind.Completed)
+            {
+                if (continuation)
+                {
+                    await AppendEventAsync(project, QueueEventTypes.ContinuationAttemptCompleted, manifest.RunId, step.Id.Value, sessionId, manifest.TaskDescriptor?.FileName, "Continuation завершился успешно.", cancellationToken);
+                }
+
+                return await MarkStepCompletedAsync(project, manifest, stepIndex, result.MessageId, cancellationToken);
+            }
+
+            if (classification.Kind == OpenCodeStepOutcomeKind.NeedsManualIntervention)
+            {
+                return await MarkManualAsync(project, manifest, classification.Message ?? "OpenCode запросил ручное вмешательство.", cancellationToken);
+            }
+
+            if (classification.Kind == OpenCodeStepOutcomeKind.FatalFailure || !resilience.Enabled)
+            {
+                return await MarkStepFailedAsync(project, manifest, stepIndex, classification.Message ?? result.ErrorMessage ?? "OpenCode не выполнил prompt успешно.", cancellationToken);
+            }
+
+            var limitError = GetRecoveryLimitError(step, resilience, stepStartedAt, clock.Now);
+            if (limitError is not null)
+            {
+                await AppendEventAsync(project, QueueEventTypes.RecoveryLimitExceeded, manifest.RunId, step.Id.Value, sessionId, manifest.TaskDescriptor?.FileName, limitError, cancellationToken);
+                return await MarkManualAsync(project, manifest, limitError, cancellationToken);
+            }
+
+            var message = $"Обнаружено прерывание OpenCode: {classification.Signature ?? classification.Message ?? "recoverable interruption"}. Текущий шаг не считается завершённым. Отправляю continuation prompt в ту же сессию OpenCode. Попытка восстановления: {step.ContinuationAttempts + 1} из {resilience.MaxContinuationAttemptsPerStep}.";
+            await AppendEventAsync(project, QueueEventTypes.RecoverableInterruptionDetected, manifest.RunId, step.Id.Value, sessionId, manifest.TaskDescriptor?.FileName, message, cancellationToken);
+
+            if (result.IsTransportError || result.IsTimeout)
+            {
+                manifest = await ScheduleTransportRetryAsync(project, manifest, stepIndex, resilience, cancellationToken);
+            }
+
+            currentPayload = BuildContinuationPayload(manifest, manifest.Steps[stepIndex]);
+            continuation = true;
+            await AppendEventAsync(project, QueueEventTypes.ContinuationPromptSent, manifest.RunId, step.Id.Value, sessionId, manifest.TaskDescriptor?.FileName, "Continuation prompt отправлен в ту же sessionId.", cancellationToken);
+        }
+    }
+
+    private async Task<RunManifest> RecordAttemptAsync(ProjectProfile project, RunManifest manifest, int stepIndex, OpenCodeMessageResult result, StepClassification classification, bool isContinuation, CancellationToken cancellationToken)
+    {
+        var step = manifest.Steps[stepIndex];
+        var signature = classification.Signature;
+        var sameSignatureRepeats = !string.IsNullOrWhiteSpace(signature) && string.Equals(signature, step.LastInterruptionSignature, StringComparison.OrdinalIgnoreCase)
+            ? step.SameSignatureRepeatCount + 1
+            : string.IsNullOrWhiteSpace(signature) ? step.SameSignatureRepeatCount : 1;
+        var logs = step.AttemptLogs.ToList();
+        logs.Add(new StepAttemptLog
+        {
+            AttemptNumber = logs.Count + 1,
+            IsContinuation = isContinuation,
+            MessageId = result.MessageId,
+            Outcome = classification.Kind.ToString(),
+            Signature = signature,
+            StdoutLogPath = result.StdoutLogPath,
+            StderrLogPath = result.StderrLogPath,
+            MessageLogPath = result.MessageLogPath,
+            StartedAt = result.StartedAt ?? clock.Now,
+            FinishedAt = result.FinishedAt ?? clock.Now
+        });
+
+        var updatedStep = step with
+        {
+            Status = classification.Kind == OpenCodeStepOutcomeKind.Completed ? step.Status : WorkflowStepStatus.Recovering,
+            ContinuationAttempts = isContinuation ? step.ContinuationAttempts + 1 : step.ContinuationAttempts,
+            TransportRetries = result.IsTransportError || result.IsTimeout ? step.TransportRetries + 1 : step.TransportRetries,
+            LastInterruptionSignature = signature ?? step.LastInterruptionSignature,
+            SameSignatureRepeatCount = sameSignatureRepeats,
+            LastProgressAt = clock.Now,
+            AttemptLogs = logs,
+            RecoveryMessageId = isContinuation ? result.MessageId ?? step.RecoveryMessageId : step.RecoveryMessageId,
+            SessionMessageId = !isContinuation ? result.MessageId ?? step.SessionMessageId : step.SessionMessageId
+        };
+
+        var updated = ReplaceStep(manifest, stepIndex, updatedStep) with
+        {
+            CurrentLogicalStepStatus = updatedStep.Status.ToString(),
+            CurrentStepContinuationAttempts = updatedStep.ContinuationAttempts,
+            CurrentStepTransportRetries = updatedStep.TransportRetries,
+            LastInterruptionSignature = updatedStep.LastInterruptionSignature,
+            SameSignatureRepeatCount = updatedStep.SameSignatureRepeatCount,
+            LastProgressAt = updatedStep.LastProgressAt,
+            UpdatedAt = clock.Now
+        };
+        await stateStore.SaveRunManifestAsync(project, updated, cancellationToken);
+        return updated;
+    }
+
+    private async Task<RunManifest> ScheduleTransportRetryAsync(ProjectProfile project, RunManifest manifest, int stepIndex, ResilienceSettings resilience, CancellationToken cancellationToken)
+    {
+        var step = manifest.Steps[stepIndex];
+        var delaySeconds = resilience.RetryDelaySeconds * Math.Pow(Math.Max(1.0, resilience.RetryBackoffMultiplier), Math.Max(0, step.TransportRetries - 1));
+        var nextRetryAt = clock.Now.AddSeconds(delaySeconds);
+        var updatedStep = step with { NextRetryAt = nextRetryAt };
+        var updated = ReplaceStep(manifest, stepIndex, updatedStep) with { NextRetryAt = nextRetryAt, UpdatedAt = clock.Now };
+        await stateStore.SaveRunManifestAsync(project, updated, cancellationToken);
+        await AppendEventAsync(project, QueueEventTypes.TransportRetryScheduled, manifest.RunId, step.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, $"Ожидаю {delaySeconds:0} секунд перед повтором из-за сетевой ошибки.", cancellationToken);
+        if (delaySeconds > 0)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
+        }
+
+        return updated;
+    }
+
+    private static string? GetRecoveryLimitError(WorkflowStep step, ResilienceSettings resilience, DateTimeOffset stepStartedAt, DateTimeOffset now)
+    {
+        if (step.ContinuationAttempts >= resilience.MaxContinuationAttemptsPerStep)
+        {
+            return "Достигнут лимит continuation attempts для текущего шага. Требуется ручное вмешательство. Очередь остановлена. Task prompt не перенесён в completed/archive.";
+        }
+
+        if (step.SameSignatureRepeatCount > resilience.StopAfterSameSignatureRepeats)
+        {
+            return "Достигнут лимит повторов одной и той же ошибки. Требуется ручное вмешательство. Очередь остановлена. Task prompt не перенесён в completed/archive.";
+        }
+
+        if (step.TransportRetries > resilience.MaxTransportRetriesPerAttempt)
+        {
+            return "Достигнут лимит transport retries для текущего шага. Требуется ручное вмешательство.";
+        }
+
+        if (now - stepStartedAt > TimeSpan.FromMinutes(resilience.StepTimeoutMinutes))
+        {
+            return "Истёк общий timeout logical step. Требуется ручное вмешательство.";
+        }
+
+        return null;
+    }
+
+    private static bool IsLostSessionError(OpenCodeClientException exception)
+    {
+        var text = ExceptionText(exception);
+        return text.Contains("HTTP 404", StringComparison.OrdinalIgnoreCase)
+            && text.Contains("/session/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRecoverableTransportException(OpenCodeClientException exception)
+    {
+        var text = ExceptionText(exception);
+        return exception.InnerException is HttpRequestException or IOException or TimeoutException or TaskCanceledException
+            || text.Contains("connection reset", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("network error", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("ECONNRESET", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("ETIMEDOUT", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("socket hang up", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("timeout", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsTimeoutException(OpenCodeClientException exception)
+    {
+        var text = ExceptionText(exception);
+        return exception.InnerException is TimeoutException or TaskCanceledException
+            || text.Contains("timeout", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("ETIMEDOUT", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ExceptionText(Exception exception)
+    {
+        return string.Join('\n', exception.Message, exception.InnerException?.Message);
+    }
+
+    private PromptPayload BuildContinuationPayload(RunManifest manifest, WorkflowStep step)
+    {
+        var attempt = step.ContinuationAttempts + 1;
+        return new PromptPayload
+        {
+            Content = manifest.OpenCodeSettingsSnapshot.Resilience.ContinuationPrompt ?? OpenCodeContinuationPrompt.Default,
+            SourcePath = step.SnapshotPath ?? step.SourcePath,
+            MessageId = $"{manifest.RunId}:{step.Id.Value}:continuation:{attempt}",
+            Transport = PromptTransport.Inline,
+            MaxInlinePromptChars = manifest.OpenCodeSettingsSnapshot.MaxInlinePromptChars,
+            RunId = manifest.RunId,
+            StepId = step.Id.Value
+        };
     }
 
     private async Task<PromptPayload> BuildPayloadAsync(RunManifest manifest, WorkflowStep step, CancellationToken cancellationToken)
@@ -443,8 +666,8 @@ public sealed class QueueUseCases(
     private async Task<RunManifest> MarkStepCompletedAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string? messageId, CancellationToken cancellationToken)
     {
         var step = manifest.Steps[stepIndex];
-        var completed = step with { Status = WorkflowStepStatus.Completed, SessionMessageId = messageId ?? step.SessionMessageId, CompletedAt = clock.Now };
-        manifest = ReplaceStep(manifest, stepIndex, completed) with { CurrentStepIndex = stepIndex + 1, UpdatedAt = clock.Now, LastError = null };
+        var completed = step with { Status = WorkflowStepStatus.Completed, SessionMessageId = messageId ?? step.SessionMessageId, CompletedAt = clock.Now, LastProgressAt = clock.Now };
+        manifest = ReplaceStep(manifest, stepIndex, completed) with { CurrentStepIndex = stepIndex + 1, CurrentLogicalStepStatus = completed.Status.ToString(), LastProgressAt = clock.Now, UpdatedAt = clock.Now, LastError = null };
         await stateStore.SaveRunManifestAsync(project, manifest, cancellationToken);
         await AppendEventAsync(project, QueueEventTypes.StepCompleted, manifest.RunId, completed.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, null, cancellationToken);
         return manifest;
@@ -458,30 +681,6 @@ public sealed class QueueUseCases(
         await stateStore.SaveRunManifestAsync(project, failedManifest, cancellationToken);
         await AppendEventAsync(project, QueueEventTypes.StepFailed, manifest.RunId, failed.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, error, cancellationToken);
         return failedManifest;
-    }
-
-    private async Task<RunManifest> MarkRecoveryPendingAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string message, string? recoveryMessageId, CancellationToken cancellationToken)
-    {
-        var step = manifest.Steps[stepIndex];
-        var recovering = step with { Status = WorkflowStepStatus.Recovering, RecoveryMessageId = recoveryMessageId ?? step.RecoveryMessageId };
-        var recoveryManifest = ReplaceStep(manifest, stepIndex, recovering) with
-        {
-            Status = RunStatus.Running,
-            CurrentStepIndex = stepIndex,
-            LastError = message,
-            UpdatedAt = clock.Now
-        };
-        await stateStore.SaveRunManifestAsync(project, recoveryManifest, cancellationToken);
-        await AppendEventAsync(project, QueueEventTypes.RecoveryCompleted, manifest.RunId, recovering.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, message, cancellationToken);
-        return recoveryManifest;
-    }
-
-    private async Task<RunManifest> MarkRecoveryUnavailableAsync(ProjectProfile project, RunManifest manifest, string message, CancellationToken cancellationToken)
-    {
-        var updated = manifest with { Status = RunStatus.Running, LastError = message, UpdatedAt = clock.Now };
-        await stateStore.SaveRunManifestAsync(project, updated, cancellationToken);
-        await AppendEventAsync(project, QueueEventTypes.RecoveryCompleted, manifest.RunId, null, manifest.SessionId, manifest.TaskDescriptor?.FileName, message, cancellationToken);
-        return updated;
     }
 
     private async Task<RunManifest> ArchiveCompletedRunAsync(ProjectProfile project, RunManifest manifest, CancellationToken cancellationToken)
@@ -513,6 +712,7 @@ public sealed class QueueUseCases(
     {
         var manual = manifest with { Status = RunStatus.NeedsManualIntervention, LastError = error, UpdatedAt = clock.Now };
         await stateStore.SaveRunManifestAsync(project, manual, cancellationToken);
+        await AppendEventAsync(project, QueueEventTypes.NeedsManualInterventionDetected, manifest.RunId, null, manifest.SessionId, manifest.TaskDescriptor?.FileName, error, cancellationToken);
         return manual;
     }
 
@@ -591,6 +791,7 @@ public sealed class QueueUseCases(
 
     private async Task AppendEventAsync(ProjectProfile project, string type, string? runId, string? stepId, string? sessionId, string? taskFile, string? message, CancellationToken cancellationToken)
     {
+        ReportProgress(type, message);
         await stateStore.AppendEventAsync(project, new QueueEvent
         {
             Type = type,
@@ -602,6 +803,29 @@ public sealed class QueueUseCases(
             Message = message,
             CreatedAt = clock.Now
         }, cancellationToken);
+    }
+
+    private void ReportProgress(string type, string? message)
+    {
+        if (reporter is null || string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        if (type is QueueEventTypes.NeedsManualInterventionDetected or QueueEventTypes.RecoveryLimitExceeded)
+        {
+            reporter.Warning(message);
+            return;
+        }
+
+        if (type is QueueEventTypes.RecoverableInterruptionDetected
+            or QueueEventTypes.ContinuationPromptSent
+            or QueueEventTypes.ContinuationAttemptCompleted
+            or QueueEventTypes.TransportRetryScheduled
+            or QueueEventTypes.ActiveRunRecoveredAfterRestart)
+        {
+            reporter.Info(message);
+        }
     }
 
     private static RunManifest ReplaceStep(RunManifest manifest, int stepIndex, WorkflowStep step)

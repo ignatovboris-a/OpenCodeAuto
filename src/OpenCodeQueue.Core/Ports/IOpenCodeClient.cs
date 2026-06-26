@@ -16,7 +16,5 @@ public interface IOpenCodeClient
 
     Task<OpenCodeSessionStatus> GetSessionStatusAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken);
 
-    Task<StepRecoveryResult> TryRecoverStepAsync(ProjectProfile project, RunManifest manifest, WorkflowStep step, CancellationToken cancellationToken);
-
     Task AbortSessionAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken);
 }

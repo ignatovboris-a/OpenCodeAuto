@@ -172,6 +172,35 @@ quality prompt 03
 
 Перед созданием run runner выполняет preflight выбранного OpenCode adapter. Если внешний OpenCode Server открыт для другого `projectDir` или OpenCode недоступен, новая task не выбирается, prompt не отправляется и active run не создаётся.
 
+## Resilience И Continuation
+
+`terminated`, `Tool execution aborted`, `aborted`, `cancelled`, `connection reset`, `timeout`, `network error`, `ECONNRESET`, `ETIMEDOUT` и похожие признаки не считаются успешным завершением шага. Runner классифицирует их как recoverable interruption, сохраняет состояние текущего logical step и отправляет continuation prompt в ту же `sessionId`.
+
+После recoverable interruption исходный task или quality prompt не отправляется повторно. Continuation prompt просит OpenCode продолжить с последнего фактически выполненного действия, проверить `git diff`, состояние файлов и результаты команд. Quality prompts запускаются только после успешного task step, а task prompt переносится в archive/completed только после успешного завершения task и всех quality prompts.
+
+Пример настройки в `defaults` или `openCodeOverrides`:
+
+```jsonc
+{
+  "resilience": {
+    "enabled": true,
+    "stepTimeoutMinutes": 90,
+    "idleTimeoutMinutes": 20,
+    "maxContinuationAttemptsPerStep": 5,
+    "maxTransportRetriesPerAttempt": 3,
+    "retryDelaySeconds": 15,
+    "retryBackoffMultiplier": 2.0,
+    "stopAfterSameSignatureRepeats": 3,
+    "detectTerminatedText": true,
+    "recoverOnToolExecutionAborted": true,
+    "autoRespondToRecoverableQuestions": true,
+    "continuationPrompt": null
+  }
+}
+```
+
+Лимиты нужны для защиты от бесконечного цикла одной и той же ошибки. Если превышен лимит continuation attempts, transport retries или повторов одинаковой signature, run переходит в `NeedsManualIntervention`, очередь останавливается, а task prompt остаётся в `prompts`.
+
 ## Recovery После Crash
 
 Состояние хранится без БД:
@@ -192,6 +221,8 @@ opencode-queue resume --config opencode-queue.json
 Если в `state.json` есть `activeRunId`, новый `run` не выберет следующую task. Нужно выполнить `resume`, проверить статус или сознательно сделать `abort`.
 
 Если OpenCode недоступен во время `resume`, состояние active run сохраняется, новая task не выбирается, а пользователю выводится русскоязычная ошибка. Для незавершённого running step без `sessionId` автоматическое восстановление останавливается в `NeedsManualIntervention`, чтобы не повторить prompt в новой session.
+
+При `resume` runner ищет `activeRunId`, загружает manifest, проверяет сохранённый `sessionId` и продолжает незавершённый step через continuation/recovery в той же сессии. Если OpenCode больше не может найти или продолжить сессию, run переводится в `NeedsManualIntervention`.
 
 ## Почему Session Id В Manifest
 
@@ -242,9 +273,9 @@ opencode-queue doctor --config opencode-queue.json
 
 `status` показывает количество task prompts, quality prompts и active run. `list` показывает найденные prompt-файлы в порядке выполнения. `doctor` запускает validation, проверяет state/lock и доступность OpenCode для выбранного `projectDir`.
 
-Runtime-данные находятся в `.queue`. Смотрите `events.jsonl` для хронологии и `runs/<runId>/manifest.json` для детального состояния step-by-step. CLI adapter может сохранять stdout/stderr OpenCode в run logs, если соответствующий транспорт задействован реализацией adapter.
+Runtime-данные находятся в `.queue`. Смотрите `events.jsonl` для хронологии и `runs/<runId>/manifest.json` для детального состояния step-by-step. CLI adapter сохраняет stdout/stderr отдельных попыток в `runs/<runId>/attempts/`, а manifest хранит ссылки на эти diagnostic logs.
 
-Полный prompt text не пишется в command log как command-line argument; для длинных prompts используется attachment transport. Snapshot prompt осознанно хранится в `.queue/runs/<runId>/snapshots/`. `serverPassword` не сохраняется в manifest в исходном виде: snapshot настроек OpenCode в manifest содержит redacted-значение.
+Полный prompt text не пишется в command log как command-line argument. В CLI adapter режим `Auto` использует attachment transport, чтобы prompt text не попадал в command line; явный `Inline` остаётся ручным opt-in. Snapshot prompt осознанно хранится в `.queue/runs/<runId>/snapshots/`. `serverPassword` не сохраняется в manifest в исходном виде: snapshot настроек OpenCode в manifest содержит redacted-значение.
 
 ## Server API И CLI Fallback
 
@@ -260,7 +291,10 @@ CLI fallback полезен как запасной режим, но имеет 
 - runner обязан передавать `--dir <projectDir>`;
 - recovery безопасен только при известном `sessionId`;
 - нельзя полагаться на неявное `--continue`;
+- stdout/stderr классифицируются, поэтому ненулевой exit code с `Tool execution aborted` считается recoverable interruption, а не немедленным fatal failure;
 - диагностика статуса беднее, чем через Server API.
+
+Для полноценного recovery предпочтителен OpenCode Server API с сохранённым `sessionId`. CLI fallback ограничен, если конкретную сессию нельзя надёжно восстановить.
 
 ## CLI Examples
 
