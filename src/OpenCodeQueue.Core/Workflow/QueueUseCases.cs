@@ -424,7 +424,7 @@ public sealed class QueueUseCases(
             UpdatedAt = clock.Now
         };
         await stateStore.SaveRunManifestAsync(project, manifest, cancellationToken);
-        await AppendEventAsync(project, QueueEventTypes.StepStarted, manifest.RunId, running.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, null, cancellationToken);
+        await AppendEventAsync(project, QueueEventTypes.StepStarted, manifest.RunId, running.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, Path.GetFileName(running.SourcePath), cancellationToken);
 
         try
         {
@@ -851,7 +851,7 @@ public sealed class QueueUseCases(
         var completed = step with { Status = WorkflowStepStatus.Completed, SessionMessageId = messageId ?? step.SessionMessageId, CompletedAt = clock.Now, LastProgressAt = clock.Now };
         manifest = ReplaceStep(manifest, stepIndex, completed) with { CurrentStepIndex = stepIndex + 1, CurrentLogicalStepStatus = completed.Status.ToString(), LastProgressAt = clock.Now, UpdatedAt = clock.Now, LastError = null };
         await stateStore.SaveRunManifestAsync(project, manifest, cancellationToken);
-        await AppendEventAsync(project, QueueEventTypes.StepCompleted, manifest.RunId, completed.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, null, cancellationToken);
+        await AppendEventAsync(project, QueueEventTypes.StepCompleted, manifest.RunId, completed.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, Path.GetFileName(completed.SourcePath), cancellationToken);
         return manifest;
     }
 
@@ -973,7 +973,7 @@ public sealed class QueueUseCases(
 
     private async Task AppendEventAsync(ProjectProfile project, string type, string? runId, string? stepId, string? sessionId, string? taskFile, string? message, CancellationToken cancellationToken)
     {
-        ReportProgress(type, message);
+        ReportProgress(project, type, stepId, taskFile, message);
         await stateStore.AppendEventAsync(project, new QueueEvent
         {
             Type = type,
@@ -987,27 +987,104 @@ public sealed class QueueUseCases(
         }, cancellationToken);
     }
 
-    private void ReportProgress(string type, string? message)
+    private void ReportProgress(ProjectProfile project, string type, string? stepId, string? taskFile, string? message)
     {
-        if (reporter is null || string.IsNullOrWhiteSpace(message))
+        if (reporter is null)
         {
             return;
         }
 
+        var quiet = project.OpenCodeOverrides.ConsoleVerbosity == ConsoleVerbosity.Quiet;
         if (type is QueueEventTypes.NeedsManualInterventionDetected or QueueEventTypes.RecoveryLimitExceeded)
         {
-            reporter.Warning(message);
+            reporter.Warning(message ?? "Требуется ручное вмешательство.");
             return;
         }
 
-        if (type is QueueEventTypes.RecoverableInterruptionDetected
-            or QueueEventTypes.ContinuationPromptSent
-            or QueueEventTypes.ContinuationAttemptCompleted
-            or QueueEventTypes.TransportRetryScheduled
-            or QueueEventTypes.ActiveRunRecoveredAfterRestart)
+        var progress = FormatProgressMessage(type, stepId, taskFile, message);
+        if (string.IsNullOrWhiteSpace(progress))
         {
-            reporter.Info(message);
+            return;
         }
+
+        if (type is QueueEventTypes.StepFailed or QueueEventTypes.RecoverableInterruptionDetected)
+        {
+            reporter.Warning(progress);
+            return;
+        }
+
+        if (!quiet)
+        {
+            reporter.Info(progress);
+        }
+    }
+
+    private static string? FormatProgressMessage(string type, string? stepId, string? taskFile, string? message)
+    {
+        var stepLabel = FormatStepLabel(stepId);
+        var promptFile = string.IsNullOrWhiteSpace(message) ? taskFile : message;
+        return type switch
+        {
+            QueueEventTypes.RunCreated => $"Запущена задача: {taskFile ?? "без имени"}.",
+            QueueEventTypes.StepStarted when stepLabel is not null => $"Запущен {stepLabel}: {promptFile ?? "prompt"}.",
+            QueueEventTypes.StepCompleted when stepLabel is not null => $"Завершён {stepLabel}: {promptFile ?? "prompt"}.",
+            QueueEventTypes.StepFailed when stepLabel is not null => $"{stepLabel} завершился ошибкой: {TrimProgressText(message)}",
+            QueueEventTypes.RecoverableInterruptionDetected => $"Произошла ошибка \"{ExtractInterruption(message)}\". Запускаю recovery для {stepLabel ?? "текущего шага"}.",
+            QueueEventTypes.ContinuationPromptSent => $"Recovery prompt отправлен для {stepLabel ?? "текущего шага"}.",
+            QueueEventTypes.ContinuationAttemptCompleted => $"Recovery завершён для {stepLabel ?? "текущего шага"}.",
+            QueueEventTypes.TransportRetryScheduled => TrimProgressText(message),
+            QueueEventTypes.ActiveRunRecoveredAfterRestart => TrimProgressText(message),
+            QueueEventTypes.TaskArchived => $"Задача архивирована: {taskFile ?? "без имени"}.",
+            QueueEventTypes.RunCompleted => $"Задача завершена: {taskFile ?? "без имени"}.",
+            QueueEventTypes.RunAborted => $"Run остановлен: {taskFile ?? "без имени"}.",
+            _ => null
+        };
+    }
+
+    private static string? FormatStepLabel(string? stepId)
+    {
+        if (string.IsNullOrWhiteSpace(stepId))
+        {
+            return null;
+        }
+
+        return string.Equals(stepId, WorkflowStepId.Task.Value, StringComparison.OrdinalIgnoreCase)
+            ? "task"
+            : stepId;
+    }
+
+    private static string TrimProgressText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "нет деталей";
+        }
+
+        var normalized = text.ReplaceLineEndings(" ").Trim();
+        return normalized.Length <= 240 ? normalized : normalized[..237] + "...";
+    }
+
+    private static string ExtractInterruption(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return "recoverable interruption";
+        }
+
+        const string prefix = "Обнаружено прерывание OpenCode:";
+        var start = message.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+        if (start >= 0)
+        {
+            var valueStart = start + prefix.Length;
+            var valueEnd = message.IndexOf('.', valueStart);
+            var value = valueEnd > valueStart ? message[valueStart..valueEnd] : message[valueStart..];
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return TrimProgressText(value.Trim());
+            }
+        }
+
+        return TrimProgressText(message);
     }
 
     private static RunManifest ReplaceStep(RunManifest manifest, int stepIndex, WorkflowStep step)

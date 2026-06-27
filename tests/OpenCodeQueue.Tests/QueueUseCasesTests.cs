@@ -39,6 +39,25 @@ public sealed class QueueUseCasesTests
     }
 
     [Fact]
+    public async Task RunQueueAsync_PrintsSimpleProgressLogs()
+    {
+        var reporter = new TestReporter();
+        var fixture = await CreateFixtureAsync(reporter: reporter);
+        await File.WriteAllTextAsync(Path.Combine(fixture.ProjectDir, "prompts", "01-task.md"), "task body");
+        await File.WriteAllTextAsync(Path.Combine(fixture.ProjectDir, "quality", "01-review.md"), "review one");
+
+        var result = await fixture.UseCases.RunQueueAsync(fixture.ConfigPath, null, once: true, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Contains("Запущена задача: 01-task.md.", reporter.Messages);
+        Assert.Contains("Запущен task: 01-task.md.", reporter.Messages);
+        Assert.Contains("Завершён task: 01-task.md.", reporter.Messages);
+        Assert.Contains("Запущен quality-01: 01-review.md.", reporter.Messages);
+        Assert.Contains("Завершён quality-01: 01-review.md.", reporter.Messages);
+        Assert.Contains("Задача завершена: 01-task.md.", reporter.Messages);
+    }
+
+    [Fact]
     public async Task RunQueueAsync_WhenQualityFails_StopsAndKeepsTaskPending()
     {
         var fixture = await CreateFixtureAsync(failStepId: "quality-01");
@@ -554,7 +573,7 @@ public sealed class QueueUseCasesTests
         Assert.Contains("server down", manifest.LastError, StringComparison.Ordinal);
     }
 
-    private static async Task<Fixture> CreateFixtureAsync(string? failStepId = null, bool changeTaskBeforeArchive = false, bool stopOnQualityFailure = true, OpenCodeSettings? settings = null, Exception? ensureReadyException = null, Exception? abortSessionException = null, Exception? getSessionException = null, Dictionary<string, Queue<OpenCodeMessageResult>>? scriptedResults = null, Queue<OpenCodeSessionStatus>? statusResults = null)
+    private static async Task<Fixture> CreateFixtureAsync(string? failStepId = null, bool changeTaskBeforeArchive = false, bool stopOnQualityFailure = true, OpenCodeSettings? settings = null, Exception? ensureReadyException = null, Exception? abortSessionException = null, Exception? getSessionException = null, Dictionary<string, Queue<OpenCodeMessageResult>>? scriptedResults = null, Queue<OpenCodeSessionStatus>? statusResults = null, IConsoleReporter? reporter = null)
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
         var projectDir = Path.Combine(root, "project");
@@ -576,7 +595,8 @@ public sealed class QueueUseCasesTests
             new RunWorkspace(),
             new FileSystemArchiver(),
             new FixedClock(),
-            new OpenCodeStepResultClassifier());
+            new OpenCodeStepResultClassifier(),
+            reporter);
         return new Fixture(configPath, ProjectPaths.QueueDir(project), project, stateStore, openCode, useCases);
     }
 
@@ -699,6 +719,19 @@ public sealed class QueueUseCasesTests
     private sealed class FixedClock : IClock
     {
         public DateTimeOffset Now => FixedNow;
+    }
+
+    private sealed class TestReporter : IConsoleReporter
+    {
+        public List<string> Messages { get; } = [];
+
+        public void Info(string message) => Messages.Add(message);
+
+        public void Warning(string message) => Messages.Add(message);
+
+        public void Error(string message) => Messages.Add(message);
+
+        public string? ReadLine(string prompt) => null;
     }
 
     private static DateTimeOffset FixedNow => DateTimeOffset.Parse("2026-06-26T10:00:00Z");
