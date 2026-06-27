@@ -123,11 +123,12 @@ public sealed class OpenCodeServerClientTests
         using var document = JsonDocument.Parse(body!);
         Assert.Equal("msg-1", document.RootElement.GetProperty("messageID").GetString());
         Assert.Equal(content, document.RootElement.GetProperty("parts")[0].GetProperty("text").GetString());
-        Assert.Equal("openai", document.RootElement.GetProperty("providerID").GetString());
         Assert.Equal("openai", document.RootElement.GetProperty("model").GetProperty("providerID").GetString());
         Assert.Equal("gpt-5.5", document.RootElement.GetProperty("model").GetProperty("modelID").GetString());
-        Assert.Equal("gpt-5.5", document.RootElement.GetProperty("modelID").GetString());
-        Assert.Equal("high", document.RootElement.GetProperty("reasoningEffort").GetString());
+        Assert.False(document.RootElement.TryGetProperty("providerID", out _));
+        Assert.False(document.RootElement.TryGetProperty("modelID", out _));
+        Assert.False(document.RootElement.TryGetProperty("reasoningEffort", out _));
+        Assert.False(document.RootElement.TryGetProperty("reasoning", out _));
         Assert.False(document.RootElement.TryGetProperty("agent", out _));
     }
 
@@ -166,7 +167,7 @@ public sealed class OpenCodeServerClientTests
     }
 
     [Fact]
-    public async Task SendPromptAsync_WhenSessionHasCompletedAssistant_SendsParentId()
+    public async Task SendPromptAsync_WhenSessionHasCompletedAssistant_UsesPromptAsyncWithoutParentId()
     {
         var root = NewProjectDir();
         var project = ExternalProject(root) with { OpenCodeOverrides = ExternalProject(root).OpenCodeOverrides with { PromptTransport = PromptTransport.Inline } };
@@ -211,7 +212,8 @@ public sealed class OpenCodeServerClientTests
 
         Assert.NotNull(body);
         using var document = JsonDocument.Parse(body!);
-        Assert.Equal("msg-assistant-1", document.RootElement.GetProperty("parentID").GetString());
+        Assert.Equal("msg-2", document.RootElement.GetProperty("messageID").GetString());
+        Assert.False(document.RootElement.TryGetProperty("parentID", out _));
     }
 
     [Fact]
@@ -397,6 +399,62 @@ public sealed class OpenCodeServerClientTests
 
         Assert.True(result.IsSuccess);
         Assert.Equal("final", result.LastAssistantText);
+    }
+
+    [Fact]
+    public async Task SendPromptAsync_WhenAssistantRepeatsWhileBusy_AbortsSessionAndReturnsManualIntervention()
+    {
+        var root = NewProjectDir();
+        var project = ExternalProject(root) with { OpenCodeOverrides = ExternalProject(root).OpenCodeOverrides with { PromptTransport = PromptTransport.Inline } };
+        var posted = false;
+        var aborted = false;
+        var repeatedText = new string('x', 120);
+        using var httpClient = new HttpClient(new FakeHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/session/ses-1/prompt_async" && request.Method == HttpMethod.Post)
+            {
+                posted = true;
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
+            }
+
+            if (request.RequestUri!.AbsolutePath == "/session/ses-1/abort" && request.Method == HttpMethod.Post)
+            {
+                aborted = true;
+                return Json(new { ok = true });
+            }
+
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/global/health" => Json(new { healthy = true, version = "test" }),
+                "/path" => Json(new { worktree = root, directory = root }),
+                "/session/status" => Json(new Dictionary<string, object> { ["ses-1"] = new { type = "busy" } }),
+                "/session/ses-1/message" when request.Method == HttpMethod.Get && !posted => Json(Array.Empty<object>()),
+                "/session/ses-1/message" when request.Method == HttpMethod.Get => Json(new object[]
+                {
+                    new { info = new { id = "msg-1", role = "user", time = new { created = 1 }, parentID = (string?)null }, parts = Array.Empty<object>() },
+                    new { info = new { id = "msg-a1", role = "assistant", time = new { created = 2, completed = 3 }, parentID = "msg-1" }, parts = new object[] { new { type = "text", text = repeatedText } } },
+                    new { info = new { id = "msg-a2", role = "assistant", time = new { created = 4, completed = 5 }, parentID = "msg-1" }, parts = new object[] { new { type = "text", text = repeatedText } } },
+                    new { info = new { id = "msg-a3", role = "assistant", time = new { created = 6, completed = 7 }, parentID = "msg-1" }, parts = new object[] { new { type = "text", text = repeatedText } } },
+                    new { info = new { id = "msg-a4", role = "assistant", time = new { created = 8, completed = 9 }, parentID = "msg-1" }, parts = new object[] { new { type = "text", text = repeatedText } } },
+                    new { info = new { id = "msg-a5", role = "assistant", time = new { created = 10, completed = 11 }, parentID = "msg-1" }, parts = new object[] { new { type = "text", text = repeatedText } } },
+                    new { info = new { id = "msg-a6", role = "assistant", time = new { created = 12, completed = 13 }, parentID = "msg-1" }, parts = new object[] { new { type = "text", text = repeatedText } } }
+                }),
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound)
+            };
+        }));
+        var client = new OpenCodeServerClient(httpClient);
+
+        var result = await client.SendPromptAsync(project, "ses-1", new PromptPayload
+        {
+            Content = "prompt",
+            SourcePath = Path.Combine(root, "prompts", "01.md"),
+            MessageId = "msg-1",
+            Transport = PromptTransport.Inline
+        }, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.True(aborted);
+        Assert.Contains("NEEDS_MANUAL_INTERVENTION", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

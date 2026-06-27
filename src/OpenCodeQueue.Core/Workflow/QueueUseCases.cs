@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using OpenCodeQueue.Core.Configuration;
 using OpenCodeQueue.Core.OpenCode;
 using OpenCodeQueue.Core.Ports;
@@ -18,6 +19,11 @@ public sealed class QueueUseCases(
     IOpenCodeRunClassifier classifier,
     IConsoleReporter? reporter = null) : IQueueUseCases
 {
+    private const string OpenCodeIdentifierChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    private static readonly Lock OpenCodeMessageIdLock = new();
+    private static long lastOpenCodeMessageTimestamp;
+    private static long openCodeMessageCounter;
+
     public async Task<QueueOperationResult> RunQueueAsync(string configPath, string? projectId, bool once, CancellationToken cancellationToken)
     {
         var project = await ResolveProjectAsync(configPath, projectId, cancellationToken);
@@ -343,8 +349,18 @@ public sealed class QueueUseCases(
                 manifest = ReplaceStep(manifest, index, recoveryStep) with { CurrentStepIndex = index, CurrentLogicalStepStatus = recoveryStep.Status.ToString(), UpdatedAt = clock.Now };
                 await stateStore.SaveRunManifestAsync(project, manifest, cancellationToken);
                 await AppendEventAsync(project, QueueEventTypes.ActiveRunRecoveredAfterRestart, manifest.RunId, recoveryStep.Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, $"Сессия восстановлена, продолжаю текущий {recoveryStep.Kind.ToString().ToLowerInvariant()} prompt: {Path.GetFileName(recoveryStep.SourcePath)}.", cancellationToken);
-                var continuationPayload = BuildContinuationPayload(manifest, recoveryStep);
-                manifest = await SendLogicalStepWithRecoveryAsync(project, manifest, index, sessionId, continuationPayload, isContinuation: true, cancellationToken);
+                var inFlightMessageId = recoveryStep.RecoveryMessageId ?? recoveryStep.SessionMessageId;
+                if (!string.IsNullOrWhiteSpace(inFlightMessageId))
+                {
+                    var inFlightPayload = (await BuildPayloadAsync(manifest, recoveryStep, cancellationToken)) with { MessageId = inFlightMessageId };
+                    manifest = await SendLogicalStepWithRecoveryAsync(project, manifest, index, sessionId, inFlightPayload, isContinuation: recoveryStep.RecoveryMessageId is not null, cancellationToken: cancellationToken, sendFirst: false);
+                }
+                else
+                {
+                    var continuationPayload = BuildContinuationPayload(manifest, recoveryStep);
+                    manifest = await SendLogicalStepWithRecoveryAsync(project, manifest, index, sessionId, continuationPayload, isContinuation: true, cancellationToken);
+                }
+
                 if (manifest.Steps[index].Status == WorkflowStepStatus.Completed)
                 {
                     continue;
@@ -483,7 +499,7 @@ public sealed class QueueUseCases(
             && text.Contains("BadRequest", StringComparison.OrdinalIgnoreCase);
     }
 
-    private async Task<RunManifest> SendLogicalStepWithRecoveryAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string sessionId, PromptPayload payload, bool isContinuation, CancellationToken cancellationToken)
+    private async Task<RunManifest> SendLogicalStepWithRecoveryAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string sessionId, PromptPayload payload, bool isContinuation, CancellationToken cancellationToken, bool sendFirst = true)
     {
         var resilience = manifest.OpenCodeSettingsSnapshot.Resilience;
         var stepStartedAt = clock.Now;
@@ -494,9 +510,12 @@ public sealed class QueueUseCases(
         {
             OpenCodeMessageResult result;
             var messageLogPath = await runWorkspace.WriteAttemptMessageAsync(project, manifest.RunId, currentPayload.MessageId, currentPayload.Content, cancellationToken);
+            manifest = await RecordDispatchedMessageAsync(project, manifest, stepIndex, currentPayload.MessageId, continuation, cancellationToken);
             try
             {
-                result = await openCodeClient.SendPromptAsync(project, sessionId, currentPayload, cancellationToken);
+                result = sendFirst
+                    ? await openCodeClient.SendPromptAsync(project, sessionId, currentPayload, cancellationToken)
+                    : await openCodeClient.WaitForPromptAsync(project, sessionId, currentPayload.MessageId, cancellationToken);
                 result = result with { MessageLogPath = result.MessageLogPath ?? messageLogPath };
             }
             catch (OpenCodeClientException exception) when (IsLostSessionError(exception))
@@ -519,6 +538,7 @@ public sealed class QueueUseCases(
             var classification = classifier.Classify(result, resilience);
             manifest = await RecordAttemptAsync(project, manifest, stepIndex, result, classification, continuation, cancellationToken);
             var step = manifest.Steps[stepIndex];
+            sendFirst = true;
 
             if (classification.Kind == OpenCodeStepOutcomeKind.Completed)
             {
@@ -557,7 +577,7 @@ public sealed class QueueUseCases(
                 return await MarkManualAsync(project, manifest, limitError, cancellationToken);
             }
 
-            var message = $"Обнаружено прерывание OpenCode: {classification.Signature ?? classification.Message ?? "recoverable interruption"}. Текущий шаг не считается завершённым. Отправляю continuation prompt в ту же сессию OpenCode. Попытка восстановления: {step.ContinuationAttempts + 1} из {resilience.MaxContinuationAttemptsPerStep}.";
+            var message = $"Обнаружено прерывание OpenCode: {classification.Signature ?? classification.Message ?? "recoverable interruption"}. Текущий шаг не считается завершённым; запускаю recovery в той же сессии OpenCode. Попытка continuation: {step.ContinuationAttempts + 1} из {resilience.MaxContinuationAttemptsPerStep}.";
             await AppendEventAsync(project, QueueEventTypes.RecoverableInterruptionDetected, manifest.RunId, step.Id.Value, sessionId, manifest.TaskDescriptor?.FileName, message, cancellationToken);
 
             if (result.IsTransportError || result.IsTimeout)
@@ -575,6 +595,22 @@ public sealed class QueueUseCases(
             continuation = true;
             await AppendEventAsync(project, QueueEventTypes.ContinuationPromptSent, manifest.RunId, step.Id.Value, sessionId, manifest.TaskDescriptor?.FileName, "Continuation prompt отправлен в ту же sessionId.", cancellationToken);
         }
+    }
+
+    private async Task<RunManifest> RecordDispatchedMessageAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string messageId, bool isContinuation, CancellationToken cancellationToken)
+    {
+        var step = manifest.Steps[stepIndex];
+        var updatedStep = isContinuation
+            ? step with { RecoveryMessageId = messageId, LastProgressAt = clock.Now }
+            : step with { SessionMessageId = messageId, LastProgressAt = clock.Now };
+        var updated = ReplaceStep(manifest, stepIndex, updatedStep) with
+        {
+            CurrentLogicalStepStatus = updatedStep.Status.ToString(),
+            LastProgressAt = updatedStep.LastProgressAt,
+            UpdatedAt = clock.Now
+        };
+        await stateStore.SaveRunManifestAsync(project, updated, cancellationToken);
+        return updated;
     }
 
     private async Task<string?> WaitForSessionReadyForContinuationAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string sessionId, ResilienceSettings resilience, CancellationToken cancellationToken)
@@ -757,7 +793,7 @@ public sealed class QueueUseCases(
         {
             Content = manifest.OpenCodeSettingsSnapshot.Resilience.ContinuationPrompt ?? OpenCodeContinuationPrompt.Default,
             SourcePath = step.SnapshotPath ?? step.SourcePath,
-            MessageId = BuildOpenCodeMessageId(manifest.RunId, step.Id.Value, "continuation", attempt.ToString()),
+            MessageId = BuildOpenCodeMessageId(),
             Transport = PromptTransport.Inline,
             MaxInlinePromptChars = manifest.OpenCodeSettingsSnapshot.MaxInlinePromptChars,
             RunId = manifest.RunId,
@@ -773,7 +809,7 @@ public sealed class QueueUseCases(
         {
             Content = content,
             SourcePath = path,
-            MessageId = BuildOpenCodeMessageId(manifest.RunId, step.Id.Value, step.AttemptCount.ToString()),
+            MessageId = BuildOpenCodeMessageId(),
             Transport = manifest.OpenCodeSettingsSnapshot.PromptTransport,
             MaxInlinePromptChars = manifest.OpenCodeSettingsSnapshot.MaxInlinePromptChars,
             RunId = manifest.RunId,
@@ -781,11 +817,32 @@ public sealed class QueueUseCases(
         };
     }
 
-    private static string BuildOpenCodeMessageId(params string[] parts)
+    private string BuildOpenCodeMessageId()
     {
-        var raw = string.Join('_', parts.Where(part => !string.IsNullOrWhiteSpace(part)));
-        var chars = raw.Select(ch => char.IsLetterOrDigit(ch) ? ch : '_').ToArray();
-        return "msg_" + new string(chars).Trim('_');
+        var timestamp = clock.Now.ToUnixTimeMilliseconds();
+        long counter;
+        lock (OpenCodeMessageIdLock)
+        {
+            if (timestamp != lastOpenCodeMessageTimestamp)
+            {
+                lastOpenCodeMessageTimestamp = timestamp;
+                openCodeMessageCounter = 0;
+            }
+
+            counter = ++openCodeMessageCounter;
+        }
+
+        var current = (timestamp * 0x1000L + counter) & 0xffffffffffffL;
+        Span<byte> bytes = stackalloc byte[14];
+        RandomNumberGenerator.Fill(bytes);
+
+        Span<char> suffix = stackalloc char[14];
+        for (var index = 0; index < bytes.Length; index++)
+        {
+            suffix[index] = OpenCodeIdentifierChars[bytes[index] % OpenCodeIdentifierChars.Length];
+        }
+
+        return "msg_" + current.ToString("x12") + new string(suffix);
     }
 
     private async Task<RunManifest> MarkStepCompletedAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string? messageId, CancellationToken cancellationToken)

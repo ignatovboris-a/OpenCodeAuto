@@ -13,7 +13,7 @@ namespace OpenCodeQueue.Infrastructure.OpenCode;
 public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private static readonly TimeSpan NoAssistantStartTimeout = TimeSpan.FromSeconds(10);
+    private const int RepeatedAssistantLoopThreshold = 6;
     private readonly HttpClient httpClient;
     private readonly SemaphoreSlim readinessGate = new(1, 1);
 
@@ -60,10 +60,15 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
     public async Task<OpenCodeMessageResult> SendPromptAsync(ProjectProfile project, string sessionId, PromptPayload payload, CancellationToken cancellationToken)
     {
         await EnsureReadyAsync(project, cancellationToken);
-        var parentId = await FindLastCompletedAssistantIdAsync(project, sessionId, cancellationToken);
-        var body = BuildMessageBody(project, payload, parentId);
+        var body = BuildMessageBody(project, payload);
         var messageId = payload.MessageId;
         await SendNoContentAsync(project, HttpMethod.Post, $"/session/{Uri.EscapeDataString(sessionId)}/prompt_async", body, cancellationToken);
+        return await WaitForAssistantResponseAsync(project, sessionId, messageId, cancellationToken);
+    }
+
+    public async Task<OpenCodeMessageResult> WaitForPromptAsync(ProjectProfile project, string sessionId, string messageId, CancellationToken cancellationToken)
+    {
+        await EnsureReadyAsync(project, cancellationToken);
         return await WaitForAssistantResponseAsync(project, sessionId, messageId, cancellationToken);
     }
 
@@ -220,7 +225,7 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         return request;
     }
 
-    private object BuildMessageBody(ProjectProfile project, PromptPayload payload, string? parentId)
+    private object BuildMessageBody(ProjectProfile project, PromptPayload payload)
     {
         var transport = OpenCodePrompt.ResolveTransport(payload);
         var parts = new List<object>();
@@ -244,11 +249,6 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
             ["messageID"] = payload.MessageId,
             ["parts"] = parts
         };
-        if (!string.IsNullOrWhiteSpace(parentId))
-        {
-            body["parentID"] = parentId;
-        }
-
         AddModelSettings(project, body);
 
         if (!string.IsNullOrWhiteSpace(project.OpenCodeOverrides.Agent))
@@ -261,30 +261,12 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
 
     private static void AddModelSettings(ProjectProfile project, Dictionary<string, object> body)
     {
-        if (!string.IsNullOrWhiteSpace(project.OpenCodeOverrides.Provider))
-        {
-            body["providerID"] = project.OpenCodeOverrides.Provider;
-        }
-
         if (!string.IsNullOrWhiteSpace(project.OpenCodeOverrides.Model))
         {
             body["model"] = string.IsNullOrWhiteSpace(project.OpenCodeOverrides.Provider)
                 ? new { modelID = project.OpenCodeOverrides.Model }
                 : new { providerID = project.OpenCodeOverrides.Provider, modelID = project.OpenCodeOverrides.Model };
-            body["modelID"] = project.OpenCodeOverrides.Model;
         }
-
-        if (!string.IsNullOrWhiteSpace(project.OpenCodeOverrides.ReasoningEffort))
-        {
-            body["reasoningEffort"] = project.OpenCodeOverrides.ReasoningEffort;
-            body["reasoning"] = new { effort = project.OpenCodeOverrides.ReasoningEffort };
-        }
-    }
-
-    private async Task<string?> FindLastCompletedAssistantIdAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
-    {
-        var messages = await GetMessagesAsync(project, sessionId, cancellationToken);
-        return messages.LastOrDefault(item => item.Role == "assistant" && item.IsCompleted)?.Id;
     }
 
     private async Task<OpenCodeMessageResult> WaitForAssistantResponseAsync(ProjectProfile project, string sessionId, string messageId, CancellationToken cancellationToken)
@@ -297,8 +279,19 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         while (DateTimeOffset.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var status = await GetSessionStatusAsync(project, sessionId, cancellationToken);
-            var messages = await GetMessagesAsync(project, sessionId, cancellationToken);
+            OpenCodeSessionStatus status;
+            IReadOnlyList<OpenCodeMessage> messages;
+            try
+            {
+                status = await GetSessionStatusAsync(project, sessionId, cancellationToken);
+                messages = await GetMessagesAsync(project, sessionId, cancellationToken);
+            }
+            catch (OpenCodeClientException exception) when (IsTransientPollingError(exception))
+            {
+                await Task.Delay(1000, cancellationToken);
+                continue;
+            }
+
             var progressSignature = BuildProgressSignature(status, messages);
             if (!string.Equals(progressSignature, lastProgressSignature, StringComparison.Ordinal))
             {
@@ -323,6 +316,18 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
                 return new OpenCodeMessageResult(true, messageId, true, LastAssistantText: assistant.Text);
             }
 
+            if (status.State == OpenCodeSessionState.Busy && HasRepeatedAssistantLoop(messages, messageId, out var repeatedText))
+            {
+                await AbortSessionAsync(project, sessionId, cancellationToken);
+                return new OpenCodeMessageResult(
+                    false,
+                    messageId,
+                    true,
+                    "NEEDS_MANUAL_INTERVENTION: OpenCode stuck in a repeated assistant response loop; session was aborted to stop token usage.",
+                    LastAssistantText: repeatedText,
+                    FinishedAt: DateTimeOffset.UtcNow);
+            }
+
             if (status.State != OpenCodeSessionState.Busy && assistant?.PendingToolName == "question")
             {
                 var error = "question: OpenCode requested user input through the question tool. Answer it manually in OpenCode UI, then resume the run.";
@@ -335,11 +340,6 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
                 return new OpenCodeMessageResult(false, messageId, false, error, LastAssistantText: assistant.Text, FinishedAt: DateTimeOffset.UtcNow);
             }
 
-            if (status.State != OpenCodeSessionState.Busy && userMessage is not null && assistant is null && DateTimeOffset.UtcNow - lastProgressAt >= NoAssistantStartTimeout)
-            {
-                return new OpenCodeMessageResult(false, messageId, false, "Timeout: OpenCode accepted the prompt but did not start an assistant response.", IsTimeout: true, FinishedAt: DateTimeOffset.UtcNow);
-            }
-
             if (status.State is OpenCodeSessionState.Failed or OpenCodeSessionState.Aborted)
             {
                 return new OpenCodeMessageResult(false, messageId, false, status.Message ?? $"OpenCode session перешла в статус {status.State}.");
@@ -347,6 +347,11 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
 
             if (DateTimeOffset.UtcNow - lastProgressAt >= idleDeadline)
             {
+                if (userMessage is not null && assistant is null)
+                {
+                    return new OpenCodeMessageResult(false, messageId, false, "NEEDS_MANUAL_INTERVENTION: OpenCode accepted the prompt but did not start an assistant response; not retrying to avoid duplicate prompts.", FinishedAt: DateTimeOffset.UtcNow);
+                }
+
                 return new OpenCodeMessageResult(false, messageId, false, $"Idle timeout: OpenCode не присылал новых событий или сообщений {resilience.IdleTimeoutMinutes} минут.", IsTimeout: true, FinishedAt: DateTimeOffset.UtcNow);
             }
 
@@ -354,6 +359,18 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         }
 
         return new OpenCodeMessageResult(false, messageId, false, "Timeout ожидания завершённого assistant response от OpenCode server.", IsTimeout: true, FinishedAt: DateTimeOffset.UtcNow);
+    }
+
+    private static bool IsTransientPollingError(OpenCodeClientException exception)
+    {
+        var text = string.Join('\n', exception.Message, exception.InnerException?.Message);
+        return exception.InnerException is HttpRequestException or IOException or TimeoutException or TaskCanceledException
+            || text.Contains("connection reset", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("network error", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("ECONNRESET", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("ETIMEDOUT", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("socket hang up", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("timeout", StringComparison.OrdinalIgnoreCase);
     }
 
     private static OpenCodeMessage? FindAssistantResponse(IReadOnlyList<OpenCodeMessage> messages, string messageId)
@@ -374,6 +391,74 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         }
 
         return messages.LastOrDefault(item => item.Role == "assistant" && string.Equals(item.ParentId, messageId, StringComparison.Ordinal));
+    }
+
+    private static bool HasRepeatedAssistantLoop(IReadOnlyList<OpenCodeMessage> messages, string messageId, out string? repeatedText)
+    {
+        repeatedText = null;
+        var userIndex = -1;
+        for (var index = 0; index < messages.Count; index++)
+        {
+            if (string.Equals(messages[index].Id, messageId, StringComparison.Ordinal))
+            {
+                userIndex = index;
+                break;
+            }
+        }
+
+        if (userIndex < 0)
+        {
+            return false;
+        }
+
+        var consecutive = 0;
+        string? previous = null;
+        for (var index = messages.Count - 1; index > userIndex; index--)
+        {
+            var message = messages[index];
+            if (message.Role != "assistant" || !message.IsCompleted)
+            {
+                continue;
+            }
+
+            var normalized = NormalizeAssistantLoopText(message.Text);
+            if (normalized is null)
+            {
+                continue;
+            }
+
+            if (previous is null)
+            {
+                previous = normalized;
+                repeatedText = message.Text;
+                consecutive = 1;
+                continue;
+            }
+
+            if (!string.Equals(previous, normalized, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            consecutive++;
+            if (consecutive >= RepeatedAssistantLoopThreshold)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string? NormalizeAssistantLoopText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || text.Length < 80)
+        {
+            return null;
+        }
+
+        var collapsed = string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return collapsed.Length <= 240 ? collapsed : collapsed[..240];
     }
 
     private static string BuildProgressSignature(OpenCodeSessionStatus status, IReadOnlyList<OpenCodeMessage> messages)

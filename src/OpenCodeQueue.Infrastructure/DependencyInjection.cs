@@ -18,7 +18,7 @@ public static class DependencyInjection
         services.AddSingleton<IAppConfigStore, JsonAppConfigStore>();
         services.AddSingleton<IProjectRegistry, JsonProjectRegistry>();
         services.AddSingleton<IProjectDiscoveryService, CompositeProjectDiscoveryService>();
-        services.AddSingleton<IOpenCodeClient>(_ => new OpenCodeServerClient(new HttpClient { Timeout = TimeSpan.FromMinutes(20) }));
+        services.AddSingleton<IOpenCodeClient>(_ => new OpenCodeServerClient(new HttpClient { Timeout = TimeSpan.FromMinutes(120) }));
         services.AddSingleton<IPromptRepository, FileSystemPromptRepository>();
         services.AddSingleton<IStateStore, JsonStateStore>();
         services.AddSingleton<IRunLock, FileRunLock>();

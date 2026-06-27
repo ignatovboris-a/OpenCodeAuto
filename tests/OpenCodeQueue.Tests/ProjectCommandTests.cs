@@ -324,6 +324,11 @@ public sealed class ProjectCommandTests
             return Task.FromResult(new OpenCodeMessageResult(true, payload.MessageId));
         }
 
+        public Task<OpenCodeMessageResult> WaitForPromptAsync(ProjectProfile project, string sessionId, string messageId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new OpenCodeMessageResult(true, messageId));
+        }
+
         public Task<OpenCodeSessionStatus> GetSessionStatusAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
         {
             return Task.FromResult(new OpenCodeSessionStatus(OpenCodeSessionState.Idle));

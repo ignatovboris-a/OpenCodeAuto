@@ -14,6 +14,8 @@ public interface IOpenCodeClient
 
     Task<OpenCodeMessageResult> SendPromptAsync(ProjectProfile project, string sessionId, PromptPayload payload, CancellationToken cancellationToken);
 
+    Task<OpenCodeMessageResult> WaitForPromptAsync(ProjectProfile project, string sessionId, string messageId, CancellationToken cancellationToken);
+
     Task<OpenCodeSessionStatus> GetSessionStatusAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken);
 
     Task AbortSessionAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken);

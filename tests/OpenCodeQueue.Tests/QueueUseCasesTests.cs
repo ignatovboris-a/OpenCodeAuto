@@ -368,7 +368,7 @@ public sealed class QueueUseCasesTests
 
         Assert.True(result.IsSuccess);
         Assert.Equal(["task", "task", "quality-01"], fixture.OpenCode.SentStepIds);
-        Assert.Contains("continuation", fixture.OpenCode.Payloads[1].MessageId, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Не начинай задачу заново", fixture.OpenCode.Payloads[1].Content, StringComparison.OrdinalIgnoreCase);
         var taskAttemptLogs = result.Manifest!.Steps[0].AttemptLogs;
         Assert.Equal(2, taskAttemptLogs.Count);
         Assert.All(taskAttemptLogs, log => Assert.True(File.Exists(log.MessageLogPath)));
@@ -636,6 +636,11 @@ public sealed class QueueUseCasesTests
         public Task<OpenCodeMessageResult> SendPromptAsync(ProjectProfile project, string sessionId, PromptPayload payload, CancellationToken cancellationToken)
         {
             return RecordAsync(project, sessionId, payload, cancellationToken).ContinueWith(_ => Result(payload), cancellationToken);
+        }
+
+        public Task<OpenCodeMessageResult> WaitForPromptAsync(ProjectProfile project, string sessionId, string messageId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new OpenCodeMessageResult(true, messageId));
         }
 
         public Task<OpenCodeSessionDetails> GetSessionAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
