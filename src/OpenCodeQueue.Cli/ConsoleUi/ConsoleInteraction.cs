@@ -41,8 +41,6 @@ internal static class ConsoleInteraction
         reporter.Info("Будет сохранён проект:");
         reporter.Info($"  id: {project.Id}");
         reporter.Info($"  projectDir: {project.ProjectDir}");
-        reporter.Info($"  promptsDir: {project.PromptsDir}");
-        reporter.Info($"  qualityDir: {project.QualityDir}");
-        reporter.Info($"  stateDir: {project.StateDir}");
+        reporter.Info($"  OpenCode provider/model: {project.OpenCodeOverrides.Provider}/{project.OpenCodeOverrides.Model}");
     }
 }

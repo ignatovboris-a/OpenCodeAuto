@@ -7,6 +7,7 @@ using OpenCodeQueue.Infrastructure.Configuration;
 using OpenCodeQueue.Infrastructure.Discovery;
 using OpenCodeQueue.Infrastructure.Prompts;
 using OpenCodeQueue.Infrastructure.State;
+using OpenCodeQueue.Infrastructure;
 
 namespace OpenCodeQueue.Tests;
 
@@ -22,9 +23,6 @@ public sealed class InteractiveMenuTests
         var reporter = new TestReporter([
             "2",
             "project-a", "Project A", projectDir,
-            "", "y",
-            "", "y",
-            "", "y",
             "", "",
             "y",
             "0"
@@ -41,13 +39,13 @@ public sealed class InteractiveMenuTests
         Assert.Equal(projectDir, project.ProjectDir);
         Assert.Equal("project-a", config.ActiveProjectId!.Value.Value);
         Assert.Contains(reporter.Messages, message => message.Contains("Конфигурация OpenCodeQueue не найдена", StringComparison.Ordinal));
-        Assert.True(Directory.Exists(Path.Combine(projectDir, "prompts")));
-        Assert.True(Directory.Exists(Path.Combine(projectDir, "quality")));
-        Assert.True(Directory.Exists(Path.Combine(projectDir, ".queue")));
+        Assert.True(Directory.Exists(ProjectPaths.PromptsDir(project)));
+        Assert.True(Directory.Exists(ProjectPaths.QualityDir(project)));
+        Assert.True(Directory.Exists(ProjectPaths.RunsDir(project)));
     }
 
     [Fact]
-    public async Task RunAsync_FirstStartManualProject_UsesDefaultDirectoriesWhenAccepted()
+    public async Task RunAsync_FirstStartManualProject_UsesFixedQueueDirectories()
     {
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "opencode-queue.json");
@@ -56,9 +54,6 @@ public sealed class InteractiveMenuTests
         var reporter = new TestReporter([
             "2",
             "project-a", "", projectDir,
-            "", "y",
-            "", "y",
-            "", "y",
             "", "",
             "y",
             "0"
@@ -67,9 +62,12 @@ public sealed class InteractiveMenuTests
         await CreateMenu(reporter).RunAsync(configPath, CancellationToken.None);
         var project = (await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None))!.Projects.Single();
 
-        Assert.Equal(Path.Combine(projectDir, "prompts"), project.PromptsDir);
-        Assert.Equal(Path.Combine(projectDir, "quality"), project.QualityDir);
-        Assert.Equal(Path.Combine(projectDir, ".queue"), project.StateDir);
+        Assert.Equal(string.Empty, project.PromptsDir);
+        Assert.Null(project.QualityDir);
+        Assert.Equal(string.Empty, project.StateDir);
+        Assert.True(Directory.Exists(ProjectPaths.PromptsDir(project)));
+        Assert.True(Directory.Exists(ProjectPaths.QualityDir(project)));
+        Assert.True(Directory.Exists(ProjectPaths.RunsDir(project)));
     }
 
     [Fact]
@@ -80,13 +78,10 @@ public sealed class InteractiveMenuTests
         var activeProject = await AddProjectAsync(configPath, root, "active-project");
         await new JsonProjectRegistry(new JsonAppConfigStore()).SelectAsync(configPath, activeProject.Id.Value, CancellationToken.None);
         var projectDir = Path.Combine(root, "OpenCode Project");
-        Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
-        Directory.CreateDirectory(Path.Combine(projectDir, "quality"));
-        Directory.CreateDirectory(Path.Combine(projectDir, ".queue"));
         var discovery = new StaticDiscoveryService([
             new DiscoveredProject("OpenCode Server API", "OpenCode Project", projectDir, "opencode-project", DiscoveryConfidence.High, [], true)
         ]);
-        var reporter = new TestReporter(["7", "1", "", "", "", "", "y", "0"]);
+        var reporter = new TestReporter(["7", "1", "", "y", "0"]);
 
         var exitCode = await CreateMenu(reporter, discoveryService: discovery).RunAsync(configPath, CancellationToken.None);
         var config = await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None);
@@ -122,7 +117,7 @@ public sealed class InteractiveMenuTests
     }
 
     [Fact]
-    public async Task RunAsync_WhenFolderCreationRejected_SavesChosenPathsWithoutCreatingFolders()
+    public async Task RunAsync_ManualProjectAlwaysCreatesFixedQueueFolders()
     {
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "opencode-queue.json");
@@ -131,9 +126,6 @@ public sealed class InteractiveMenuTests
         var reporter = new TestReporter([
             "2",
             "project-a", "", projectDir,
-            "", "n",
-            "", "n",
-            "", "n",
             "", "",
             "y",
             "0"
@@ -143,9 +135,10 @@ public sealed class InteractiveMenuTests
         var config = await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None);
 
         Assert.NotNull(config);
-        Assert.Equal("project-a", Assert.Single(config!.Projects).Id.Value);
-        Assert.False(Directory.Exists(Path.Combine(projectDir, "prompts")));
-        Assert.False(Directory.Exists(Path.Combine(projectDir, "quality")));
+        var project = Assert.Single(config!.Projects);
+        Assert.Equal("project-a", project.Id.Value);
+        Assert.True(Directory.Exists(ProjectPaths.PromptsDir(project)));
+        Assert.True(Directory.Exists(ProjectPaths.QualityDir(project)));
     }
 
     [Fact]
@@ -186,8 +179,31 @@ public sealed class InteractiveMenuTests
         var project = config!.Projects.Single(project => project.ProjectDir == discoveredDir);
         Assert.Equal(project.Id.Value, config.ActiveProjectId!.Value.Value);
         Assert.Equal(project.Id.Value, useCases.StatusProjectIds.Single());
-        Assert.True(Directory.Exists(Path.Combine(discoveredDir, "prompts")));
-        Assert.True(Directory.Exists(Path.Combine(discoveredDir, "quality")));
+        Assert.True(Directory.Exists(ProjectPaths.PromptsDir(project)));
+        Assert.True(Directory.Exists(ProjectPaths.QualityDir(project)));
+    }
+
+    [Fact]
+    public async Task RunAsync_SelectExistingRegistryProjectCreatesQueueFolders()
+    {
+        var root = CreateTempRoot();
+        var configPath = Path.Combine(root, "opencode-queue.json");
+        var projectA = new ProjectProfile { Id = "project-a", ProjectDir = Path.Combine(root, "project-a") };
+        var projectB = new ProjectProfile { Id = "project-b", ProjectDir = Path.Combine(root, "project-b") };
+        Directory.CreateDirectory(projectA.ProjectDir);
+        Directory.CreateDirectory(projectB.ProjectDir);
+        var registry = new JsonProjectRegistry(new JsonAppConfigStore());
+        await registry.AddOrUpdateAsync(configPath, projectA, CancellationToken.None);
+        await registry.AddOrUpdateAsync(configPath, projectB, CancellationToken.None);
+        await registry.SelectAsync(configPath, projectA.Id.Value, CancellationToken.None);
+        var reporter = new TestReporter(["6", "2", "0"]);
+
+        await CreateMenu(reporter).RunAsync(configPath, CancellationToken.None);
+
+        Assert.True(Directory.Exists(ProjectPaths.PromptsDir(projectB)));
+        Assert.True(Directory.Exists(ProjectPaths.QualityDir(projectB)));
+        Assert.True(Directory.Exists(ProjectPaths.RunsDir(projectB)));
+        Assert.NotEmpty(Directory.EnumerateFiles(ProjectPaths.QualityDir(projectB), "*.md"));
     }
 
     [Fact]
@@ -256,9 +272,10 @@ public sealed class InteractiveMenuTests
     private static async Task<ProjectProfile> AddProjectAsync(string configPath, string root, string id)
     {
         var projectDir = Path.Combine(root, id);
-        Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
-        Directory.CreateDirectory(Path.Combine(projectDir, "quality"));
         var project = new ProjectProfile { Id = id, ProjectDir = projectDir };
+        Directory.CreateDirectory(ProjectPaths.PromptsDir(project));
+        Directory.CreateDirectory(ProjectPaths.QualityDir(project));
+        Directory.CreateDirectory(ProjectPaths.RunsDir(project));
         await new JsonProjectRegistry(new JsonAppConfigStore()).AddOrUpdateAsync(configPath, project, CancellationToken.None);
         return project;
     }

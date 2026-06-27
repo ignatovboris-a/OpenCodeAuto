@@ -52,7 +52,7 @@ public sealed record OpenCodeMessageResult(
 
 public sealed record StepClassification(OpenCodeStepOutcomeKind Kind, string? Signature = null, string? Message = null);
 
-public sealed record OpenCodeMessage(string Id, string Role, bool IsCompleted, bool IsFailed, string? ParentId = null, string? ErrorMessage = null, string? Text = null);
+public sealed record OpenCodeMessage(string Id, string Role, bool IsCompleted, bool IsFailed, string? ParentId = null, string? ErrorMessage = null, string? Text = null, string? PendingToolName = null);
 
 public sealed record OpenCodeSessionDetails(OpenCodeSession Session, OpenCodeSessionStatus Status, IReadOnlyList<OpenCodeMessage> Messages);
 

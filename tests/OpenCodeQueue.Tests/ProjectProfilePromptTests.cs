@@ -27,52 +27,37 @@ public sealed class ProjectProfilePromptTests
             "project-a",
             "Project A",
             root,
-            "",
-            "n",
-            "",
-            "n",
-            "",
-            "n",
-            "http://127.0.0.1:4097",
-            "custom-opencode"
+            "http://127.0.0.1:4097"
         ]);
 
         var project = new ProjectProfilePrompt(reporter).ReadNewProject(askOpenCodeOverrides: true);
 
         Assert.NotNull(project);
         Assert.Equal("http://127.0.0.1:4097", project.OpenCodeOverrides.ServerUrl);
-        Assert.Equal("custom-opencode", project.OpenCodeOverrides.OpenCodeExecutable);
     }
 
     [Fact]
-    public void ReadUpdatedProject_ResolvesRelativeDirectoriesFromUpdatedProjectDir()
+    public void ReadUpdatedProject_UpdatesProjectDirWithoutPromptingForQueueDirectories()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
         var updatedProjectDir = Path.Combine(root, "updated project");
         var current = new ProjectProfile
         {
             Id = "project-a",
-            ProjectDir = Path.Combine(root, "old"),
-            PromptsDir = Path.Combine(root, "old", "prompts"),
-            QualityDir = Path.Combine(root, "old", "quality"),
-            StateDir = Path.Combine(root, "old", ".queue")
+            ProjectDir = Path.Combine(root, "old")
         };
         var reporter = new TestReporter([
             "",
             updatedProjectDir,
-            "custom prompts",
-            "checks",
-            "queue-state",
-            "",
             ""
         ]);
 
         var project = new ProjectProfilePrompt(reporter).ReadUpdatedProject(current);
 
         Assert.Equal(updatedProjectDir, project.ProjectDir);
-        Assert.Equal(Path.Combine(updatedProjectDir, "custom prompts"), project.PromptsDir);
-        Assert.Equal(Path.Combine(updatedProjectDir, "checks"), project.QualityDir);
-        Assert.Equal(Path.Combine(updatedProjectDir, "queue-state"), project.StateDir);
+        Assert.Equal(string.Empty, project.PromptsDir);
+        Assert.Null(project.QualityDir);
+        Assert.Equal(string.Empty, project.StateDir);
     }
 
     private sealed class TestReporter(IReadOnlyList<string?> answers) : IConsoleReporter

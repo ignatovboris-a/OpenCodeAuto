@@ -42,6 +42,7 @@ public sealed class CommandDispatcher(
             "validate" => await ValidateAsync(command, cancellationToken),
             "doctor" => await DoctorAsync(command, cancellationToken),
             "abort" => await AbortAsync(command, cancellationToken),
+            "reset" => await ResetAsync(command, cancellationToken),
             "project" => await DispatchProjectAsync(command, cancellationToken),
             _ => Unknown(command.Name)
         };
@@ -94,6 +95,26 @@ public sealed class CommandDispatcher(
         }
         var result = await queueUseCases.AbortRunAsync(command.ConfigPath, command.ProjectId, cancellationToken);
         return operationResultPrinter.Print(result);
+    }
+
+    private async Task<int> ResetAsync(CliCommand command, CancellationToken cancellationToken)
+    {
+        var project = await ResolveProjectAsync(command, cancellationToken);
+        if (project is null)
+        {
+            reporter.Warning("Активный проект не выбран.");
+            return QueueExitCodes.ValidationError;
+        }
+
+        if (!reporter.Confirm("Обнулить status/runs этого проекта и вернуть archived prompts в очередь? [y/N]: "))
+        {
+            reporter.Warning("Reset отменён.");
+            return QueueExitCodes.ValidationError;
+        }
+
+        var restored = await ProjectStatusResetter.ResetAsync(project, cancellationToken);
+        reporter.Info($"Статус проекта обнулён. Возвращено prompts из archive: {restored}.");
+        return QueueExitCodes.Success;
     }
 
     private async Task<int> ListPromptsAsync(CliCommand command, CancellationToken cancellationToken)
@@ -208,6 +229,11 @@ public sealed class CommandDispatcher(
         }
 
         var result = await projectRegistry.SelectAsync(configPath, projectId, cancellationToken);
+        if (result.IsSuccess && result.Project is not null)
+        {
+            await ProjectFileInitializer.EnsureProjectFilesAsync(result.Project, cancellationToken);
+        }
+
         return PrintRegistryResult(result.IsSuccess, result.Message);
     }
 
@@ -226,6 +252,7 @@ public sealed class CommandDispatcher(
             return QueueExitCodes.ValidationError;
         }
 
+        await ProjectFileInitializer.EnsureProjectFilesAsync(project, cancellationToken);
         var result = await projectRegistry.AddOrUpdateAsync(configPath, project, cancellationToken);
         return PrintRegistryResult(result.IsSuccess, result.Message);
     }
@@ -269,6 +296,7 @@ public sealed class CommandDispatcher(
             return QueueExitCodes.ValidationError;
         }
 
+        await ProjectFileInitializer.EnsureProjectFilesAsync(updated, cancellationToken);
         var result = await projectRegistry.AddOrUpdateAsync(configPath, updated, cancellationToken);
         return PrintRegistryResult(result.IsSuccess, result.Message);
     }
@@ -351,7 +379,7 @@ public sealed class CommandDispatcher(
     private async Task PrintStateStatusAsync(ProjectProfile project, CancellationToken cancellationToken)
     {
         var state = await stateStore.LoadQueueStateAsync(project, cancellationToken);
-        reporter.Info($"stateDir: {ProjectPaths.StateDir(project)}");
+        reporter.Info($"queueDir: {ProjectPaths.QueueDir(project)}");
         if (state is null || string.IsNullOrWhiteSpace(state.ActiveRunId))
         {
             reporter.Info("активный run: нет");
@@ -420,6 +448,7 @@ public sealed class CommandDispatcher(
         reporter.Info("  opencode-queue validate --config opencode-queue.json [--project <id>]");
         reporter.Info("  opencode-queue doctor --config opencode-queue.json [--project <id>]");
         reporter.Info("  opencode-queue abort --config opencode-queue.json [--project <id>]");
+        reporter.Info("  opencode-queue reset --config opencode-queue.json [--project <id>]");
         reporter.Info("  opencode-queue project list --config opencode-queue.json");
         reporter.Info("  opencode-queue project current --config opencode-queue.json");
         reporter.Info("  opencode-queue project select <id> --config opencode-queue.json");
@@ -428,4 +457,5 @@ public sealed class CommandDispatcher(
         reporter.Info("  opencode-queue project update <id> --config opencode-queue.json");
         reporter.Info("  opencode-queue project discover --config opencode-queue.json");
     }
+
 }

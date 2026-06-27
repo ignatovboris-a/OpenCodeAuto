@@ -1,4 +1,5 @@
 using OpenCodeQueue.Core.Configuration;
+using OpenCodeQueue.Infrastructure;
 using OpenCodeQueue.Infrastructure.Prompts;
 
 namespace OpenCodeQueue.Tests;
@@ -9,7 +10,7 @@ public sealed class FileSystemPromptRepositoryTests
     public async Task DiscoverAsync_ReturnsOnlyNumberedMarkdownTaskFiles()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
-        var prompts = Path.Combine(root, "prompts");
+        var prompts = Prompts(root);
         Directory.CreateDirectory(prompts);
         await File.WriteAllTextAsync(Path.Combine(prompts, "01-first.md"), "first");
         await File.WriteAllTextAsync(Path.Combine(prompts, "0.1. auth.md"), "auth");
@@ -32,7 +33,7 @@ public sealed class FileSystemPromptRepositoryTests
     public async Task DiscoverAsync_OrdersTaskFilesByNumericPrefixSegments()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
-        var prompts = Path.Combine(root, "prompts");
+        var prompts = Prompts(root);
         Directory.CreateDirectory(prompts);
         await File.WriteAllTextAsync(Path.Combine(prompts, "10-late.md"), "late");
         await File.WriteAllTextAsync(Path.Combine(prompts, "2-middle.md"), "middle");
@@ -60,7 +61,7 @@ public sealed class FileSystemPromptRepositoryTests
     public async Task DiscoverAsync_ParsesSupportedNumericPrefixFormats(string fileName, string expectedPrefix)
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
-        var prompts = Path.Combine(root, "prompts");
+        var prompts = Prompts(root);
         Directory.CreateDirectory(prompts);
         await File.WriteAllTextAsync(Path.Combine(prompts, fileName), "prompt");
 
@@ -78,7 +79,7 @@ public sealed class FileSystemPromptRepositoryTests
     public async Task DiscoverAsync_OrdersNumericSegmentsAsNumbers()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
-        var prompts = Path.Combine(root, "prompts");
+        var prompts = Prompts(root);
         Directory.CreateDirectory(prompts);
         await File.WriteAllTextAsync(Path.Combine(prompts, "1.10-cache.md"), "cache");
         await File.WriteAllTextAsync(Path.Combine(prompts, "1.2-api.md"), "api");
@@ -105,7 +106,7 @@ public sealed class FileSystemPromptRepositoryTests
     public async Task DiscoverAsync_OrdersRequiredNumberedFormatsAndWarnsForUnprefixedFiles()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
-        var prompts = Path.Combine(root, "prompts");
+        var prompts = Prompts(root);
         Directory.CreateDirectory(prompts);
         foreach (var fileName in new[]
         {
@@ -145,7 +146,7 @@ public sealed class FileSystemPromptRepositoryTests
     public async Task DiscoverAsync_OrdersEqualNumericKeysByFileNameThenPath()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
-        var prompts = Path.Combine(root, "prompts");
+        var prompts = Prompts(root);
         Directory.CreateDirectory(prompts);
         await File.WriteAllTextAsync(Path.Combine(prompts, "01-b.md"), "b");
         await File.WriteAllTextAsync(Path.Combine(prompts, "1-a.md"), "a");
@@ -165,14 +166,14 @@ public sealed class FileSystemPromptRepositoryTests
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
         var projectA = Path.Combine(root, "a");
         var projectB = Path.Combine(root, "b");
-        Directory.CreateDirectory(Path.Combine(projectA, "prompts"));
-        Directory.CreateDirectory(Path.Combine(projectA, "quality"));
-        Directory.CreateDirectory(Path.Combine(projectB, "prompts"));
-        Directory.CreateDirectory(Path.Combine(projectB, "quality"));
-        await File.WriteAllTextAsync(Path.Combine(projectA, "prompts", "01-a.md"), "a");
-        await File.WriteAllTextAsync(Path.Combine(projectA, "quality", "01-qa.md"), "qa");
-        await File.WriteAllTextAsync(Path.Combine(projectB, "prompts", "01-b.md"), "b");
-        await File.WriteAllTextAsync(Path.Combine(projectB, "quality", "01-qb.md"), "qb");
+        Directory.CreateDirectory(Prompts(projectA));
+        Directory.CreateDirectory(Quality(projectA));
+        Directory.CreateDirectory(Prompts(projectB));
+        Directory.CreateDirectory(Quality(projectB));
+        await File.WriteAllTextAsync(Path.Combine(Prompts(projectA), "01-a.md"), "a");
+        await File.WriteAllTextAsync(Path.Combine(Quality(projectA), "01-qa.md"), "qa");
+        await File.WriteAllTextAsync(Path.Combine(Prompts(projectB), "01-b.md"), "b");
+        await File.WriteAllTextAsync(Path.Combine(Quality(projectB), "01-qb.md"), "qb");
 
         var repository = new FileSystemPromptRepository();
 
@@ -189,8 +190,8 @@ public sealed class FileSystemPromptRepositoryTests
     public async Task DiscoverAsync_WarnsAboutQualityFilesWithoutNumericPrefix()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
-        var quality = Path.Combine(root, "quality");
-        Directory.CreateDirectory(Path.Combine(root, "prompts"));
+        var quality = Quality(root);
+        Directory.CreateDirectory(Prompts(root));
         Directory.CreateDirectory(quality);
         await File.WriteAllTextAsync(Path.Combine(quality, "review.md"), "review");
 
@@ -207,7 +208,7 @@ public sealed class FileSystemPromptRepositoryTests
     public async Task DiscoverAsync_WarnsInsteadOfThrowingForTooLargeNumericPrefix()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
-        var prompts = Path.Combine(root, "prompts");
+        var prompts = Prompts(root);
         Directory.CreateDirectory(prompts);
         await File.WriteAllTextAsync(Path.Combine(prompts, "999999999999999999999999999999-task.md"), "prompt");
 
@@ -224,10 +225,10 @@ public sealed class FileSystemPromptRepositoryTests
     public async Task DiscoverAsync_IgnoresUnderscoreDraftsOnlyForTasks()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(Path.Combine(root, "prompts"));
-        Directory.CreateDirectory(Path.Combine(root, "quality"));
-        await File.WriteAllTextAsync(Path.Combine(root, "prompts", "_01-draft.md"), "draft");
-        await File.WriteAllTextAsync(Path.Combine(root, "quality", "_01-review.md"), "review");
+        Directory.CreateDirectory(Prompts(root));
+        Directory.CreateDirectory(Quality(root));
+        await File.WriteAllTextAsync(Path.Combine(Prompts(root), "_01-draft.md"), "draft");
+        await File.WriteAllTextAsync(Path.Combine(Quality(root), "_01-review.md"), "review");
 
         var repository = new FileSystemPromptRepository();
         var project = new ProjectProfile { Id = "test", ProjectDir = root };
@@ -241,12 +242,14 @@ public sealed class FileSystemPromptRepositoryTests
     }
 
     [Fact]
-    public async Task DiscoverAsync_UsesExplicitDirectoryEvenWhenItsNameLooksInternal()
+    public async Task DiscoverAsync_IgnoresConfiguredDirectoriesAndUsesFixedQueueLayout()
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
         var completed = Path.Combine(root, "completed");
         Directory.CreateDirectory(completed);
         await File.WriteAllTextAsync(Path.Combine(completed, "01-task.md"), "task");
+        Directory.CreateDirectory(Prompts(root));
+        Directory.CreateDirectory(Quality(root));
 
         var result = await new FileSystemPromptRepository().DiscoverAsync(new ProjectProfile
         {
@@ -256,7 +259,11 @@ public sealed class FileSystemPromptRepositoryTests
             QualityDir = completed
         }, CancellationToken.None);
 
-        Assert.Equal("01-task.md", Assert.Single(result.TaskPrompts).FileName);
-        Assert.Equal("01-task.md", Assert.Single(result.QualityPrompts).FileName);
+        Assert.Empty(result.TaskPrompts);
+        Assert.Empty(result.QualityPrompts);
     }
+
+    private static string Prompts(string projectDir) => ProjectPaths.PromptsDir(new ProjectProfile { Id = "test", ProjectDir = projectDir });
+
+    private static string Quality(string projectDir) => ProjectPaths.QualityDir(new ProjectProfile { Id = "test", ProjectDir = projectDir });
 }

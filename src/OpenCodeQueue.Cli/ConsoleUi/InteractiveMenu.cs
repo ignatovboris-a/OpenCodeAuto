@@ -26,6 +26,11 @@ public sealed class InteractiveMenu(
         while (!cancellationToken.IsCancellationRequested)
         {
             var activeProject = await projectRegistry.GetActiveAsync(configPath, cancellationToken);
+            if (activeProject is not null)
+            {
+                await ProjectFileInitializer.EnsureProjectFilesAsync(activeProject, cancellationToken);
+            }
+
             var discovery = activeProject is null ? new PromptDiscoveryResult([], [], []) : await promptRepository.DiscoverAsync(activeProject, cancellationToken);
             var state = activeProject is null ? null : await stateStore.LoadQueueStateAsync(activeProject, cancellationToken);
             var hasActiveRun = !string.IsNullOrWhiteSpace(state?.ActiveRunId);
@@ -34,12 +39,7 @@ public sealed class InteractiveMenu(
             reporter.Info("OpenCodeQueue");
             reporter.Info(activeProject is null ? "Активный проект: не выбран" : $"Активный проект: {activeProject.DisplayName ?? activeProject.Id.Value}");
             reporter.Info(activeProject is null ? "Путь проекта: не выбран" : $"Путь проекта: {activeProject.ProjectDir}");
-            if (activeProject is not null)
-            {
-                reporter.Info($"promptsDir: {ProjectPaths.PromptsDir(activeProject)}");
-                reporter.Info($"qualityDir: {ProjectPaths.QualityDir(activeProject)}");
-                reporter.Info($"stateDir: {ProjectPaths.StateDir(activeProject)}");
-            }
+            reporter.Info(activeProject is null ? "OpenCode: проект не выбран" : $"OpenCode: {activeProject.OpenCodeOverrides.Provider}/{activeProject.OpenCodeOverrides.Model}, effort={activeProject.OpenCodeOverrides.ReasoningEffort}");
             reporter.Info(activeProject is null ? "Очередь задач: проект не выбран" : $"Очередь задач: prompts = {discovery.TaskPrompts.Count}, quality = {discovery.QualityPrompts.Count}");
             reporter.Info(hasActiveRun ? $"Активный run: {state!.ActiveRunId}" : "Активный run: нет");
             reporter.Info("");
@@ -51,7 +51,8 @@ public sealed class InteractiveMenu(
             reporter.Info("6. Выбор/смена проекта");
             reporter.Info("7. Добавить проект");
             reporter.Info("8. Диагностика проекта");
-            reporter.Info("9. Настройки проекта");
+            reporter.Info("9. Обнулить статус проекта");
+            reporter.Info("10. Настройки проекта");
             reporter.Info("0. Выход");
 
             var choice = reporter.ReadLine("Выберите действие: ");
@@ -82,6 +83,9 @@ public sealed class InteractiveMenu(
                     ShowDiagnostics(activeProject);
                     break;
                 case "9":
+                    await ResetProjectStatusAsync(activeProject, cancellationToken);
+                    break;
+                case "10":
                     ShowSettings(activeProject);
                     break;
                 case "0":
@@ -102,6 +106,7 @@ public sealed class InteractiveMenu(
         var activeProject = await projectRegistry.GetActiveAsync(configPath, cancellationToken);
         if (activeProject is not null && Directory.Exists(activeProject.ProjectDir))
         {
+            await ProjectFileInitializer.EnsureProjectFilesAsync(activeProject, cancellationToken);
             return;
         }
 
@@ -192,6 +197,11 @@ public sealed class InteractiveMenu(
         var result = await projectRegistry.SelectAsync(configPath, id, cancellationToken);
         if (result.IsSuccess)
         {
+            if (result.Project is not null)
+            {
+                await ProjectFileInitializer.EnsureProjectFilesAsync(result.Project, cancellationToken);
+            }
+
             reporter.Info(result.Message ?? "Активный проект выбран.");
         }
         else
@@ -223,16 +233,10 @@ public sealed class InteractiveMenu(
             Id = projectId,
             DisplayName = discovered.DisplayName,
             ProjectDir = projectDir,
-            PromptsDir = Path.Combine(projectDir, "prompts"),
-            QualityDir = Path.Combine(projectDir, "quality"),
-            StateDir = Path.Combine(projectDir, ".queue"),
-            CompletedDir = Path.Combine(projectDir, ".queue", "completed"),
             OpenCodeOverrides = config.Defaults
         };
 
-        Directory.CreateDirectory(project.PromptsDir);
-        Directory.CreateDirectory(project.QualityDir!);
-        Directory.CreateDirectory(project.StateDir);
+        await ProjectFileInitializer.EnsureProjectFilesAsync(project, cancellationToken);
 
         var addResult = await projectRegistry.AddOrUpdateAsync(configPath, project, cancellationToken);
         if (!addResult.IsSuccess)
@@ -267,6 +271,7 @@ public sealed class InteractiveMenu(
             return;
         }
 
+        await ProjectFileInitializer.EnsureProjectFilesAsync(project, cancellationToken);
         var result = await projectRegistry.AddOrUpdateAsync(configPath, project, cancellationToken);
         if (result.IsSuccess)
         {
@@ -411,6 +416,24 @@ public sealed class InteractiveMenu(
         }
 
         projectPresenter.PrintPromptList(project, discovery);
+    }
+
+    private async Task ResetProjectStatusAsync(ProjectProfile? project, CancellationToken cancellationToken)
+    {
+        if (project is null)
+        {
+            reporter.Warning("Активный проект не выбран.");
+            return;
+        }
+
+        if (!reporter.Confirm("Обнулить status/runs этого проекта и вернуть archived prompts в очередь? [y/N]: "))
+        {
+            reporter.Warning("Reset отменён.");
+            return;
+        }
+
+        var restored = await ProjectStatusResetter.ResetAsync(project, cancellationToken);
+        reporter.Info($"Статус проекта обнулён. Возвращено prompts из archive: {restored}.");
     }
 
     private void ShowDiagnostics(ProjectProfile? project)

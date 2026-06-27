@@ -37,6 +37,11 @@ project.assets.json
 *.tmp
 *.temp
 *.cache
+.opencodequeue/*.json
+.opencodequeue/*.jsonl
+.opencodequeue/lock
+.opencodequeue/runs/*
+!.opencodequeue/runs/.gitkeep
 
 # OS files
 .DS_Store

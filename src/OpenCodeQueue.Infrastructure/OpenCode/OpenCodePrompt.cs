@@ -5,8 +5,6 @@ namespace OpenCodeQueue.Infrastructure.OpenCode;
 
 internal static class OpenCodePrompt
 {
-    public const string CliAttachmentInstruction = "Выполни инструкции из прикреплённого Markdown-файла.";
-
     public const string ServerAttachmentInstruction = "Прикреплённый Markdown-файл является основным prompt. Выполни его содержимое без перевода, переписывания или нормализации.";
 
     public static PromptTransport ResolveTransport(PromptPayload payload)

@@ -8,7 +8,7 @@ using OpenCodeQueue.Infrastructure.Json;
 namespace OpenCodeQueue.Infrastructure.Configuration;
 
 /// <summary>
-/// Relative projectDir values are resolved from the config file directory; other project paths are resolved from projectDir.
+/// Relative projectDir values are resolved from the config file directory; queue folders are fixed under .opencodequeue.
 /// </summary>
 public sealed class JsonAppConfigStore(IClock? clock = null) : IAppConfigStore
 {
@@ -86,13 +86,6 @@ public sealed class JsonAppConfigStore(IClock? clock = null) : IAppConfigStore
                 return JsonSerializer.Serialize(config, QueueJson.Options);
             }
 
-            var existingNormalized = Normalize(existingConfig, configPath, document.RootElement);
-            var rawProjectsById = GetProjectElements(document.RootElement)
-                .Where(element => element.ValueKind == JsonValueKind.Object)
-                .Select(element => new { Id = JsonElementReader.ReadString(element, "id"), Element = element })
-                .Where(item => !string.IsNullOrWhiteSpace(item.Id))
-                .ToDictionary(item => item.Id!, item => item.Element, StringComparer.OrdinalIgnoreCase);
-
             var root = JsonNode.Parse(existingJson)?.AsObject() ?? [];
             root["schemaVersion"] = config.SchemaVersion;
             root["activeProjectId"] = JsonValue.Create(config.ActiveProjectId.HasValue ? config.ActiveProjectId.Value.Value : null);
@@ -101,13 +94,6 @@ public sealed class JsonAppConfigStore(IClock? clock = null) : IAppConfigStore
             var projects = new JsonArray();
             foreach (var project in config.Projects)
             {
-                var previous = existingNormalized.Projects.FirstOrDefault(item => string.Equals(item.Id.Value, project.Id.Value, StringComparison.OrdinalIgnoreCase));
-                if (previous is not null && SameProject(previous, project) && rawProjectsById.TryGetValue(project.Id.Value, out var rawProject))
-                {
-                    projects.Add(JsonNode.Parse(rawProject.GetRawText()));
-                    continue;
-                }
-
                 projects.Add(JsonSerializer.SerializeToNode(project, QueueJson.Options));
             }
 
@@ -118,11 +104,6 @@ public sealed class JsonAppConfigStore(IClock? clock = null) : IAppConfigStore
         {
             return JsonSerializer.Serialize(config, QueueJson.Options);
         }
-    }
-
-    private static bool SameProject(ProjectProfile left, ProjectProfile right)
-    {
-        return JsonSerializer.Serialize(left, QueueJson.Options) == JsonSerializer.Serialize(right, QueueJson.Options);
     }
 
     private sealed class ConfigLock(FileStream stream, string lockPath) : IAsyncDisposable
@@ -148,11 +129,6 @@ public sealed class JsonAppConfigStore(IClock? clock = null) : IAppConfigStore
     private static ProjectProfile Normalize(ProjectProfile project, string configDir, OpenCodeSettings defaults, JsonElement? projectElement, bool applyDefaults)
     {
         var projectDir = PathResolver.Resolve(project.ProjectDir, configDir);
-        var qualityDir = string.IsNullOrWhiteSpace(project.QualityDir)
-            ? project.ReviewsDir ?? "quality"
-            : project.QualityDir;
-        var stateDir = string.IsNullOrWhiteSpace(project.StateDir) ? ".queue" : project.StateDir;
-        var completedDir = string.IsNullOrWhiteSpace(project.CompletedDir) ? Path.Combine(stateDir, "completed") : project.CompletedDir;
         var openCodeOverrides = applyDefaults
             ? MergeOpenCodeSettings(defaults, project.OpenCodeOverrides, GetOpenCodeOverridesElement(projectElement))
             : project.OpenCodeOverrides;
@@ -161,11 +137,11 @@ public sealed class JsonAppConfigStore(IClock? clock = null) : IAppConfigStore
         {
             Id = new ProjectId(project.Id.Value.Trim()),
             ProjectDir = projectDir,
-            PromptsDir = PathResolver.ResolveProjectPath(project.PromptsDir, projectDir),
-            QualityDir = PathResolver.ResolveProjectPath(qualityDir, projectDir),
+            PromptsDir = string.Empty,
+            QualityDir = null,
             ReviewsDir = null,
-            StateDir = PathResolver.ResolveProjectPath(stateDir, projectDir),
-            CompletedDir = PathResolver.ResolveProjectPath(completedDir, projectDir),
+            StateDir = string.Empty,
+            CompletedDir = string.Empty,
             OpenCodeOverrides = openCodeOverrides
         };
     }
@@ -206,13 +182,12 @@ public sealed class JsonAppConfigStore(IClock? clock = null) : IAppConfigStore
 
         return new OpenCodeSettings
         {
-            OpenCodeMode = Has(overridesElement, "openCodeMode") ? overrides.OpenCodeMode : defaults.OpenCodeMode,
-            OpenCodeExecutable = Has(overridesElement, "openCodeExecutable") ? overrides.OpenCodeExecutable : defaults.OpenCodeExecutable,
             ServerUrl = Has(overridesElement, "serverUrl") ? overrides.ServerUrl : defaults.ServerUrl,
-            ManageOpenCodeServer = Has(overridesElement, "manageOpenCodeServer") ? overrides.ManageOpenCodeServer : defaults.ManageOpenCodeServer,
             ServerPassword = Has(overridesElement, "serverPassword") ? overrides.ServerPassword : defaults.ServerPassword,
             ServerUsername = Has(overridesElement, "serverUsername") ? overrides.ServerUsername : defaults.ServerUsername,
+            Provider = Has(overridesElement, "provider") ? overrides.Provider : defaults.Provider,
             Model = Has(overridesElement, "model") ? overrides.Model : defaults.Model,
+            ReasoningEffort = Has(overridesElement, "reasoningEffort") ? overrides.ReasoningEffort : defaults.ReasoningEffort,
             Agent = Has(overridesElement, "agent") ? overrides.Agent : defaults.Agent,
             PromptTransport = Has(overridesElement, "promptTransport") ? overrides.PromptTransport : defaults.PromptTransport,
             MaxInlinePromptChars = Has(overridesElement, "maxInlinePromptChars") ? overrides.MaxInlinePromptChars : defaults.MaxInlinePromptChars,

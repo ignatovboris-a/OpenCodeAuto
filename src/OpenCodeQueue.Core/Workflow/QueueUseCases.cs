@@ -125,7 +125,7 @@ public sealed class QueueUseCases(
         if (manifest is null)
         {
             var manual = await SaveManualRunAsync(project, state.ActiveRunId, "manifest.json отсутствует", cancellationToken);
-            return QueueOperationResult.Failure(QueueExitCodes.ValidationError, $"manifest.json для activeRunId '{state.ActiveRunId}' отсутствует. Новая задача не выбирается; проверьте .queue/runs вручную.") with { Project = project, State = state, Manifest = manual };
+            return QueueOperationResult.Failure(QueueExitCodes.ValidationError, $"manifest.json для activeRunId '{state.ActiveRunId}' отсутствует. Новая задача не выбирается; проверьте .opencodequeue/runs вручную.") with { Project = project, State = state, Manifest = manual };
         }
 
         var ready = await EnsureOpenCodeReadyAsync(project, state, manifest, cancellationToken);
@@ -416,7 +416,7 @@ public sealed class QueueUseCases(
             string? sessionId = manifest.SessionId;
             if (string.IsNullOrWhiteSpace(sessionId))
             {
-                var title = $"{manifest.RunId} {project.Id} {manifest.TaskDescriptor?.FileName}";
+                var title = manifest.TaskDescriptor?.FileName ?? Path.GetFileName(running.SourcePath);
                 var session = await openCodeClient.StartSessionAsync(project, title, cancellationToken);
                 sessionId = session.SessionId;
                 manifest = manifest with { SessionId = sessionId, UpdatedAt = clock.Now };

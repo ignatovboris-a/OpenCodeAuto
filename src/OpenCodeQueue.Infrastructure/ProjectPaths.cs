@@ -4,11 +4,15 @@ namespace OpenCodeQueue.Infrastructure;
 
 public static class ProjectPaths
 {
-    public static string PromptsDir(ProjectProfile project) => PathResolver.ResolveProjectPath(project.PromptsDir, project.ProjectDir, "prompts");
+    public const string QueueDirectoryName = ".opencodequeue";
 
-    public static string QualityDir(ProjectProfile project) => PathResolver.ResolveProjectPath(project.QualityDir ?? project.ReviewsDir, project.ProjectDir, "quality");
+    public static string QueueDir(ProjectProfile project) => Path.Combine(Path.GetFullPath(project.ProjectDir), QueueDirectoryName);
 
-    public static string StateDir(ProjectProfile project) => PathResolver.ResolveProjectPath(project.StateDir, project.ProjectDir, ".queue");
+    public static string PromptsDir(ProjectProfile project) => Path.Combine(QueueDir(project), "prompts");
+
+    public static string QualityDir(ProjectProfile project) => Path.Combine(QueueDir(project), "quality");
+
+    public static string StateDir(ProjectProfile project) => QueueDir(project);
 
     public static string StateFile(ProjectProfile project) => Path.Combine(StateDir(project), "state.json");
 
@@ -22,9 +26,7 @@ public static class ProjectPaths
 
     public static string RunManifestFile(ProjectProfile project, string runId) => Path.Combine(RunDir(project, runId), "manifest.json");
 
-    public static string CompletedDir(ProjectProfile project) => string.IsNullOrWhiteSpace(project.CompletedDir)
-        ? Path.Combine(StateDir(project), "completed")
-        : PathResolver.ResolveProjectPath(project.CompletedDir, project.ProjectDir);
+    public static string CompletedDir(ProjectProfile project) => Path.Combine(RunsDir(project), "completed");
 
     public static bool AreSamePath(string left, string right) => PathResolver.AreSamePath(left, right);
 }

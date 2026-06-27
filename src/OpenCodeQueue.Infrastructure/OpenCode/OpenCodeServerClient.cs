@@ -13,17 +13,13 @@ namespace OpenCodeQueue.Infrastructure.OpenCode;
 public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly TimeSpan NoAssistantStartTimeout = TimeSpan.FromSeconds(10);
     private readonly HttpClient httpClient;
-    private readonly IOpenCodeServerProcessFactory processFactory;
     private readonly SemaphoreSlim readinessGate = new(1, 1);
-    private IOpenCodeServerProcess? managedProcess;
-    private string? managedProjectDir;
-    private string? managedServerUrl;
 
-    public OpenCodeServerClient(HttpClient httpClient, IOpenCodeServerProcessFactory processFactory)
+    public OpenCodeServerClient(HttpClient httpClient)
     {
         this.httpClient = httpClient;
-        this.processFactory = processFactory;
     }
 
     public async Task EnsureReadyAsync(ProjectProfile project, CancellationToken cancellationToken)
@@ -31,38 +27,10 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         await readinessGate.WaitAsync(cancellationToken);
         try
         {
-            var settings = project.OpenCodeOverrides;
-            var serverUrl = NormalizeServerUrl(settings.ServerUrl);
-            if (settings.ManageOpenCodeServer)
-            {
-                var shouldRestart = managedProcess is null
-                    || managedProcess.HasExited
-                    || !string.Equals(managedServerUrl, serverUrl, StringComparison.OrdinalIgnoreCase)
-                    || managedProjectDir is null
-                    || !PathResolver.AreSamePath(managedProjectDir, project.ProjectDir);
-                if (shouldRestart)
-                {
-                    if (managedProcess is not null)
-                    {
-                        await managedProcess.DisposeAsync();
-                    }
-
-                    managedProcess = processFactory.Start(project, GetPort(serverUrl));
-                    managedProjectDir = project.ProjectDir;
-                    managedServerUrl = serverUrl;
-                }
-            }
-            else if (managedProcess is not null)
-            {
-                await managedProcess.DisposeAsync();
-                managedProcess = null;
-                managedProjectDir = null;
-                managedServerUrl = null;
-            }
-
+            var serverUrl = NormalizeServerUrl(project.OpenCodeOverrides.ServerUrl);
             await WaitForHealthAsync(project, serverUrl, cancellationToken);
             await EnsureProjectMatchesAsync(project, serverUrl, cancellationToken);
-            await SaveConnectionStateAsync(project, serverUrl, settings.ManageOpenCodeServer, cancellationToken);
+            await SaveConnectionStateAsync(project, serverUrl, cancellationToken);
         }
         finally
         {
@@ -92,21 +60,10 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
     public async Task<OpenCodeMessageResult> SendPromptAsync(ProjectProfile project, string sessionId, PromptPayload payload, CancellationToken cancellationToken)
     {
         await EnsureReadyAsync(project, cancellationToken);
-        var body = BuildMessageBody(project, payload);
-        using var document = await SendJsonAsync(project, HttpMethod.Post, $"/session/{Uri.EscapeDataString(sessionId)}/message", body, cancellationToken);
-        var info = document.RootElement.TryGetProperty("info", out var infoElement) ? infoElement : document.RootElement;
-        var messageId = ReadString(info, "id") ?? payload.MessageId;
-        var failed = TryReadError(info, out var error);
-        if (failed)
-        {
-            return new OpenCodeMessageResult(false, messageId, false, error);
-        }
-
-        if (HasCompletedAssistantResponse(document.RootElement))
-        {
-            return new OpenCodeMessageResult(true, messageId, true, LastAssistantText: ReadMessageText(document.RootElement));
-        }
-
+        var parentId = await FindLastCompletedAssistantIdAsync(project, sessionId, cancellationToken);
+        var body = BuildMessageBody(project, payload, parentId);
+        var messageId = payload.MessageId;
+        await SendNoContentAsync(project, HttpMethod.Post, $"/session/{Uri.EscapeDataString(sessionId)}/prompt_async", body, cancellationToken);
         return await WaitForAssistantResponseAsync(project, sessionId, messageId, cancellationToken);
     }
 
@@ -130,18 +87,14 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (managedProcess is not null)
-        {
-            await managedProcess.DisposeAsync();
-        }
-
         readinessGate.Dispose();
         httpClient.Dispose();
+        await ValueTask.CompletedTask;
     }
 
     private async Task WaitForHealthAsync(ProjectProfile project, string serverUrl, CancellationToken cancellationToken)
     {
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(project.OpenCodeOverrides.ManageOpenCodeServer ? 30 : 5);
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
         Exception? lastException = null;
         do
         {
@@ -167,7 +120,7 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
 
             await Task.Delay(300, cancellationToken);
         }
-        while (DateTimeOffset.UtcNow < deadline && managedProcess?.HasExited != true);
+        while (DateTimeOffset.UtcNow < deadline);
 
         throw new OpenCodeClientException($"OpenCode server недоступен по адресу {serverUrl}/global/health.", lastException ?? new TimeoutException());
     }
@@ -218,6 +171,20 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         }
     }
 
+    private async Task SendNoContentAsync(ProjectProfile project, HttpMethod method, string path, object? body, CancellationToken cancellationToken)
+    {
+        var serverUrl = NormalizeServerUrl(project.OpenCodeOverrides.ServerUrl);
+        using var request = CreateRequest(project, method, serverUrl, path, body);
+        using var response = await SendAsync(request, method, path, cancellationToken);
+        if (response.IsSuccessStatusCode)
+        {
+            return;
+        }
+
+        var text = await response.Content.ReadAsStringAsync(cancellationToken);
+        throw new OpenCodeClientException($"OpenCode server вернул HTTP {(int)response.StatusCode} для {method} {path}: {TrimForError(text)}");
+    }
+
     private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, HttpMethod method, string path, CancellationToken cancellationToken)
     {
         try
@@ -253,7 +220,7 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         return request;
     }
 
-    private object BuildMessageBody(ProjectProfile project, PromptPayload payload)
+    private object BuildMessageBody(ProjectProfile project, PromptPayload payload, string? parentId)
     {
         var transport = OpenCodePrompt.ResolveTransport(payload);
         var parts = new List<object>();
@@ -277,10 +244,12 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
             ["messageID"] = payload.MessageId,
             ["parts"] = parts
         };
-        if (!string.IsNullOrWhiteSpace(project.OpenCodeOverrides.Model))
+        if (!string.IsNullOrWhiteSpace(parentId))
         {
-            body["model"] = project.OpenCodeOverrides.Model;
+            body["parentID"] = parentId;
         }
+
+        AddModelSettings(project, body);
 
         if (!string.IsNullOrWhiteSpace(project.OpenCodeOverrides.Agent))
         {
@@ -288,6 +257,34 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         }
 
         return body;
+    }
+
+    private static void AddModelSettings(ProjectProfile project, Dictionary<string, object> body)
+    {
+        if (!string.IsNullOrWhiteSpace(project.OpenCodeOverrides.Provider))
+        {
+            body["providerID"] = project.OpenCodeOverrides.Provider;
+        }
+
+        if (!string.IsNullOrWhiteSpace(project.OpenCodeOverrides.Model))
+        {
+            body["model"] = string.IsNullOrWhiteSpace(project.OpenCodeOverrides.Provider)
+                ? new { modelID = project.OpenCodeOverrides.Model }
+                : new { providerID = project.OpenCodeOverrides.Provider, modelID = project.OpenCodeOverrides.Model };
+            body["modelID"] = project.OpenCodeOverrides.Model;
+        }
+
+        if (!string.IsNullOrWhiteSpace(project.OpenCodeOverrides.ReasoningEffort))
+        {
+            body["reasoningEffort"] = project.OpenCodeOverrides.ReasoningEffort;
+            body["reasoning"] = new { effort = project.OpenCodeOverrides.ReasoningEffort };
+        }
+    }
+
+    private async Task<string?> FindLastCompletedAssistantIdAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
+    {
+        var messages = await GetMessagesAsync(project, sessionId, cancellationToken);
+        return messages.LastOrDefault(item => item.Role == "assistant" && item.IsCompleted)?.Id;
     }
 
     private async Task<OpenCodeMessageResult> WaitForAssistantResponseAsync(ProjectProfile project, string sessionId, string messageId, CancellationToken cancellationToken)
@@ -315,15 +312,32 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
                 return new OpenCodeMessageResult(false, messageId, false, userMessage.ErrorMessage ?? "OpenCode сообщил об ошибке message.");
             }
 
-            var assistant = messages.FirstOrDefault(item => item.Role == "assistant" && string.Equals(item.ParentId, messageId, StringComparison.Ordinal));
+            var assistant = FindAssistantResponse(messages, messageId);
             if (assistant?.IsFailed == true)
             {
                 return new OpenCodeMessageResult(false, messageId, false, assistant.ErrorMessage ?? "Assistant response завершился ошибкой.", LastAssistantText: assistant.Text);
             }
 
-            if (assistant?.IsCompleted == true)
+            if (status.State != OpenCodeSessionState.Busy && assistant?.IsCompleted == true)
             {
                 return new OpenCodeMessageResult(true, messageId, true, LastAssistantText: assistant.Text);
+            }
+
+            if (status.State != OpenCodeSessionState.Busy && assistant?.PendingToolName == "question")
+            {
+                var error = "question: OpenCode requested user input through the question tool. Answer it manually in OpenCode UI, then resume the run.";
+                return new OpenCodeMessageResult(false, messageId, false, error, LastAssistantText: assistant.Text, FinishedAt: DateTimeOffset.UtcNow);
+            }
+
+            if (status.State != OpenCodeSessionState.Busy && !string.IsNullOrWhiteSpace(assistant?.PendingToolName))
+            {
+                var error = $"permission request: OpenCode tool '{assistant.PendingToolName}' is pending approval. Approve or deny it in OpenCode UI, then resume the run.";
+                return new OpenCodeMessageResult(false, messageId, false, error, LastAssistantText: assistant.Text, FinishedAt: DateTimeOffset.UtcNow);
+            }
+
+            if (status.State != OpenCodeSessionState.Busy && userMessage is not null && assistant is null && DateTimeOffset.UtcNow - lastProgressAt >= NoAssistantStartTimeout)
+            {
+                return new OpenCodeMessageResult(false, messageId, false, "Timeout: OpenCode accepted the prompt but did not start an assistant response.", IsTimeout: true, FinishedAt: DateTimeOffset.UtcNow);
             }
 
             if (status.State is OpenCodeSessionState.Failed or OpenCodeSessionState.Aborted)
@@ -342,10 +356,30 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         return new OpenCodeMessageResult(false, messageId, false, "Timeout ожидания завершённого assistant response от OpenCode server.", IsTimeout: true, FinishedAt: DateTimeOffset.UtcNow);
     }
 
+    private static OpenCodeMessage? FindAssistantResponse(IReadOnlyList<OpenCodeMessage> messages, string messageId)
+    {
+        var userIndex = -1;
+        for (var index = 0; index < messages.Count; index++)
+        {
+            if (string.Equals(messages[index].Id, messageId, StringComparison.Ordinal))
+            {
+                userIndex = index;
+                break;
+            }
+        }
+
+        if (userIndex >= 0)
+        {
+            return messages.Skip(userIndex + 1).LastOrDefault(item => item.Role == "assistant");
+        }
+
+        return messages.LastOrDefault(item => item.Role == "assistant" && string.Equals(item.ParentId, messageId, StringComparison.Ordinal));
+    }
+
     private static string BuildProgressSignature(OpenCodeSessionStatus status, IReadOnlyList<OpenCodeMessage> messages)
     {
         var lastMessage = messages.LastOrDefault();
-        return string.Join('|', status.State, status.Message, messages.Count, lastMessage?.Id, lastMessage?.IsCompleted, lastMessage?.IsFailed, lastMessage?.ErrorMessage);
+        return string.Join('|', status.State, status.Message, messages.Count, lastMessage?.Id, lastMessage?.IsCompleted, lastMessage?.IsFailed, lastMessage?.ErrorMessage, lastMessage?.PendingToolName);
     }
 
     private async Task<IReadOnlyList<OpenCodeMessage>> GetMessagesAsync(ProjectProfile project, string sessionId, CancellationToken cancellationToken)
@@ -370,7 +404,7 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
             var failed = TryReadError(info, out var error);
             var parentId = ReadString(info, "parentID");
             var completed = role != "assistant" || (info.TryGetProperty("time", out var time) && time.TryGetProperty("completed", out _));
-            messages.Add(new OpenCodeMessage(id, role, completed, failed, parentId, error, ReadMessageText(item)));
+            messages.Add(new OpenCodeMessage(id, role, completed, failed, parentId, error, ReadMessageText(item), ReadPendingToolName(item)));
         }
 
         return messages;
@@ -410,18 +444,6 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         return true;
     }
 
-    private static bool HasCompletedAssistantResponse(JsonElement root)
-    {
-        if (root.TryGetProperty("info", out var info))
-        {
-            return string.Equals(ReadString(info, "role"), "assistant", StringComparison.OrdinalIgnoreCase)
-                && info.TryGetProperty("time", out var time)
-                && time.TryGetProperty("completed", out _);
-        }
-
-        return false;
-    }
-
     private static string? ReadMessageText(JsonElement messageElement)
     {
         if (!messageElement.TryGetProperty("parts", out var parts) || parts.ValueKind != JsonValueKind.Array)
@@ -448,6 +470,44 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         return builder.Length == 0 ? null : builder.ToString().TrimEnd();
     }
 
+    private static string? ReadPendingToolName(JsonElement messageElement)
+    {
+        if (!messageElement.TryGetProperty("parts", out var parts) || parts.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var part in parts.EnumerateArray())
+        {
+            if (!string.Equals(ReadString(part, "type"), "tool", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!part.TryGetProperty("state", out var state))
+            {
+                continue;
+            }
+
+            var tool = ReadString(part, "tool") ?? "unknown";
+            var status = ReadString(state, "status");
+            if (string.Equals(tool, "question", StringComparison.OrdinalIgnoreCase)
+                && (string.Equals(status, "running", StringComparison.OrdinalIgnoreCase) || string.Equals(status, "pending", StringComparison.OrdinalIgnoreCase)))
+            {
+                return "question";
+            }
+
+            if (!string.Equals(status, "pending", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return tool;
+        }
+
+        return null;
+    }
+
     private static string ReadRequiredString(JsonElement element, string propertyName, string description)
     {
         return ReadString(element, propertyName) ?? throw new OpenCodeClientException($"OpenCode server вернул ответ без поля {description}.");
@@ -463,12 +523,6 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         return serverUrl.TrimEnd('/') + "/";
     }
 
-    private static int GetPort(string serverUrl)
-    {
-        var uri = new Uri(serverUrl);
-        return uri.IsDefaultPort ? 4096 : uri.Port;
-    }
-
     private static string TrimForError(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -479,12 +533,12 @@ public sealed class OpenCodeServerClient : IOpenCodeClient, IAsyncDisposable
         return text.Length <= 500 ? text : text[..500];
     }
 
-    private static async Task SaveConnectionStateAsync(ProjectProfile project, string serverUrl, bool managed, CancellationToken cancellationToken)
+    private static async Task SaveConnectionStateAsync(ProjectProfile project, string serverUrl, CancellationToken cancellationToken)
     {
         var path = Path.Combine(ProjectPaths.StateDir(project), "opencode-server.json");
         await AtomicFileWriter.WriteAsync(path, async (stream, ct) =>
         {
-            await JsonSerializer.SerializeAsync(stream, new { serverUrl, managed, updatedAt = DateTimeOffset.UtcNow }, JsonOptions, ct);
+            await JsonSerializer.SerializeAsync(stream, new { serverUrl, updatedAt = DateTimeOffset.UtcNow }, JsonOptions, ct);
         }, cancellationToken);
     }
 }

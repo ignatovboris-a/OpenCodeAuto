@@ -1,11 +1,5 @@
 namespace OpenCodeQueue.Core.Configuration;
 
-public enum OpenCodeMode
-{
-    Server,
-    Cli
-}
-
 public enum PromptTransport
 {
     Auto,
@@ -28,19 +22,17 @@ public enum PermissionPolicy
 
 public sealed record OpenCodeSettings
 {
-    public OpenCodeMode OpenCodeMode { get; init; } = OpenCodeMode.Server;
-
-    public string OpenCodeExecutable { get; init; } = "opencode";
-
     public string ServerUrl { get; init; } = "http://localhost:4096";
-
-    public bool ManageOpenCodeServer { get; init; } = true;
 
     public string? ServerPassword { get; init; }
 
     public string ServerUsername { get; init; } = "opencode";
 
-    public string? Model { get; init; }
+    public string Provider { get; init; } = "openai";
+
+    public string Model { get; init; } = "gpt-5.5";
+
+    public string ReasoningEffort { get; init; } = "high";
 
     public string? Agent { get; init; }
 
@@ -57,7 +49,7 @@ public sealed record OpenCodeSettings
     public override string ToString()
     {
         var password = ServerPassword is null ? "null" : "***";
-        return $"OpenCodeSettings {{ OpenCodeMode = {OpenCodeMode}, OpenCodeExecutable = {OpenCodeExecutable}, ServerUrl = {ServerUrl}, ManageOpenCodeServer = {ManageOpenCodeServer}, ServerPassword = {password}, ServerUsername = {ServerUsername}, Model = {Model}, Agent = {Agent}, PromptTransport = {PromptTransport}, MaxInlinePromptChars = {MaxInlinePromptChars}, ConsoleVerbosity = {ConsoleVerbosity}, Resilience = {Resilience} }}";
+        return $"OpenCodeSettings {{ ServerUrl = {ServerUrl}, ServerPassword = {password}, ServerUsername = {ServerUsername}, Provider = {Provider}, Model = {Model}, ReasoningEffort = {ReasoningEffort}, Agent = {Agent}, PromptTransport = {PromptTransport}, MaxInlinePromptChars = {MaxInlinePromptChars}, ConsoleVerbosity = {ConsoleVerbosity}, Resilience = {Resilience} }}";
     }
 }
 

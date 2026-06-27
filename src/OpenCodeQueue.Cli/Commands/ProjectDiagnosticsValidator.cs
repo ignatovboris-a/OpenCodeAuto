@@ -18,24 +18,19 @@ public sealed class ProjectDiagnosticsValidator
             errors.Add($"projectDir не существует: {project.ProjectDir}");
         }
 
-        RequireDirectory(ProjectPaths.PromptsDir(project), "promptsDir", errors);
-        RequireDirectory(ProjectPaths.QualityDir(project), "qualityDir", errors);
-        RequireWritableDirectory(ProjectPaths.StateDir(project), "stateDir", errors);
-        RequireWritableDirectory(ProjectPaths.CompletedDir(project), "completedDir", errors);
+        RequireDirectory(ProjectPaths.QueueDir(project), "queueDir", errors);
+        RequireDirectory(ProjectPaths.PromptsDir(project), "queue prompts", errors);
+        RequireDirectory(ProjectPaths.QualityDir(project), "queue quality", errors);
+        RequireWritableDirectory(ProjectPaths.RunsDir(project), "queue runs", errors);
 
         if (discovery.TaskPrompts.Count == 0)
         {
-            warnings.Add("promptsDir не содержит pending task prompts с числовым префиксом.");
+            warnings.Add("queue prompts не содержит pending task prompts с числовым префиксом.");
         }
 
         if (discovery.QualityPrompts.Count == 0)
         {
-            warnings.Add("qualityDir не содержит quality prompts с числовым префиксом.");
-        }
-
-        if (string.IsNullOrWhiteSpace(project.OpenCodeOverrides.OpenCodeExecutable))
-        {
-            errors.Add("openCodeExecutable пустой.");
+            warnings.Add("queue quality не содержит quality prompts с числовым префиксом.");
         }
 
         if (!Uri.TryCreate(project.OpenCodeOverrides.ServerUrl, UriKind.Absolute, out _))

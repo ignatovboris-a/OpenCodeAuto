@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace OpenCodeQueue.Core.Configuration;
 
 public sealed record ProjectProfile
@@ -6,16 +8,21 @@ public sealed record ProjectProfile
 
     public required string ProjectDir { get; init; }
 
-    public string PromptsDir { get; init; } = "prompts";
+    [JsonIgnore]
+    public string PromptsDir { get; init; } = string.Empty;
 
+    [JsonIgnore]
     public string? QualityDir { get; init; }
 
-    public string StateDir { get; init; } = ".queue";
+    [JsonIgnore]
+    public string StateDir { get; init; } = string.Empty;
 
     public string? DisplayName { get; init; }
 
+    [JsonIgnore]
     public string? ReviewsDir { get; init; }
 
+    [JsonIgnore]
     public string CompletedDir { get; init; } = string.Empty;
 
     public bool StopOnQualityFailure { get; init; } = true;

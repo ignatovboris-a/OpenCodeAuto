@@ -1,5 +1,6 @@
 using OpenCodeQueue.Core.Configuration;
 using OpenCodeQueue.Core.State;
+using OpenCodeQueue.Infrastructure;
 using OpenCodeQueue.Infrastructure.State;
 
 namespace OpenCodeQueue.Tests;
@@ -32,8 +33,8 @@ public sealed class JsonStateStoreTests
             UpdatedAt = DateTimeOffset.UtcNow
         }, CancellationToken.None);
         var loaded = await store.LoadRunManifestAsync(project, "run-1", CancellationToken.None);
-        var json = await File.ReadAllTextAsync(Path.Combine(root, ".queue", "state.json"));
-        var manifestJson = await File.ReadAllTextAsync(Path.Combine(root, ".queue", "runs", "run-1", "manifest.json"));
+        var json = await File.ReadAllTextAsync(ProjectPaths.StateFile(project));
+        var manifestJson = await File.ReadAllTextAsync(ProjectPaths.RunManifestFile(project, "run-1"));
 
         Assert.NotNull(loaded);
         Assert.Equal("project-a", loaded.ProjectId);
@@ -58,7 +59,7 @@ public sealed class JsonStateStoreTests
             UpdatedAt = DateTimeOffset.UtcNow
         }, CancellationToken.None);
 
-        var stateDir = Path.Combine(root, ".queue");
+        var stateDir = ProjectPaths.StateDir(project);
         Assert.True(File.Exists(Path.Combine(stateDir, "state.json")));
         Assert.Empty(Directory.EnumerateFiles(stateDir, "state.json.tmp.*"));
     }
@@ -88,7 +89,7 @@ public sealed class JsonStateStoreTests
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
         var project = new ProjectProfile { Id = "project-a", ProjectDir = root };
-        var manifestPath = Path.Combine(root, ".queue", "runs", "run-1", "manifest.json");
+        var manifestPath = ProjectPaths.RunManifestFile(project, "run-1");
         Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
         await File.WriteAllTextAsync(manifestPath, "{ broken json");
 
@@ -119,7 +120,7 @@ public sealed class JsonStateStoreTests
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
         var project = new ProjectProfile { Id = "project-a", ProjectDir = root };
-        var stateDir = Path.Combine(root, ".queue");
+        var stateDir = ProjectPaths.StateDir(project);
         Directory.CreateDirectory(stateDir);
         await File.WriteAllTextAsync(Path.Combine(stateDir, "state.json"), "{\"schemaVersion\":1,\"projectId\":\"project-a\"}");
 

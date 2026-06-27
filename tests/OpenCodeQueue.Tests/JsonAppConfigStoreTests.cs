@@ -31,7 +31,7 @@ public sealed class JsonAppConfigStoreTests
     }
 
     [Fact]
-    public async Task LoadAsync_NormalizesRelativePathsPredictably()
+    public async Task LoadAsync_NormalizesProjectDirAndIgnoresLegacyQueuePathSettings()
     {
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "config", "opencode-queue.json");
@@ -55,14 +55,16 @@ public sealed class JsonAppConfigStoreTests
         var expectedProjectDir = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(configPath)!, "../target project"));
 
         Assert.Equal(expectedProjectDir, project.ProjectDir);
-        Assert.Equal(Path.Combine(expectedProjectDir, "my prompts"), project.PromptsDir);
-        Assert.Equal(Path.Combine(expectedProjectDir, "checks"), project.QualityDir);
-        Assert.Equal(Path.Combine(expectedProjectDir, ".queue-state"), project.StateDir);
-        Assert.Equal(Path.Combine(expectedProjectDir, ".queue-state", "completed"), project.CompletedDir);
+        Assert.Equal(string.Empty, project.PromptsDir);
+        Assert.Null(project.QualityDir);
+        Assert.Equal(string.Empty, project.StateDir);
+        Assert.Equal(string.Empty, project.CompletedDir);
+        Assert.Equal(Path.Combine(expectedProjectDir, ".opencodequeue", "prompts"), ProjectPaths.PromptsDir(project));
+        Assert.Equal(Path.Combine(expectedProjectDir, ".opencodequeue", "quality"), ProjectPaths.QualityDir(project));
     }
 
     [Fact]
-    public void ProjectPaths_CompletedDirDefaultFollowsResolvedStateDir()
+    public void ProjectPaths_CompletedDirIsUnderFixedRunsDir()
     {
         var root = CreateTempRoot();
         var project = new ProjectProfile
@@ -72,11 +74,11 @@ public sealed class JsonAppConfigStoreTests
             StateDir = "queue state"
         };
 
-        Assert.Equal(Path.Combine(root, "queue state", "completed"), ProjectPaths.CompletedDir(project));
+        Assert.Equal(Path.Combine(root, ".opencodequeue", "runs", "completed"), ProjectPaths.CompletedDir(project));
     }
 
     [Fact]
-    public async Task LoadAsync_UsesReviewsDirAsQualityAlias()
+    public async Task LoadAsync_IgnoresReviewsDirAlias()
     {
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "opencode-queue.json");
@@ -92,12 +94,12 @@ public sealed class JsonAppConfigStoreTests
 
         var project = (await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None))!.Projects.Single();
 
-        Assert.Equal(Path.Combine(project.ProjectDir, "reviews"), project.QualityDir);
+        Assert.Null(project.QualityDir);
         Assert.Null(project.ReviewsDir);
     }
 
     [Fact]
-    public async Task LoadAsync_QualityDirWinsOverReviewsAliasWhenBothAreSet()
+    public async Task LoadAsync_IgnoresQualityDirAndReviewsAliasWhenBothAreSet()
     {
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "opencode-queue.json");
@@ -113,7 +115,7 @@ public sealed class JsonAppConfigStoreTests
 
         var project = (await new JsonAppConfigStore().LoadAsync(configPath, CancellationToken.None))!.Projects.Single();
 
-        Assert.Equal(Path.Combine(project.ProjectDir, "quality-checks"), project.QualityDir);
+        Assert.Null(project.QualityDir);
         Assert.Null(project.ReviewsDir);
     }
 
@@ -127,9 +129,7 @@ public sealed class JsonAppConfigStoreTests
             {
               "schemaVersion": 1,
               "defaults": {
-                "openCodeExecutable": "custom-opencode",
                 "serverUrl": "http://127.0.0.1:5000",
-                "manageOpenCodeServer": false,
                 "promptTransport": "FileAttachment",
                 "maxInlinePromptChars": 12000
               },
@@ -150,15 +150,11 @@ public sealed class JsonAppConfigStoreTests
         var projectA = projects.Single(project => project.Id.Value == "project-a");
         var projectB = projects.Single(project => project.Id.Value == "project-b");
 
-        Assert.Equal("custom-opencode", projectA.OpenCodeOverrides.OpenCodeExecutable);
         Assert.Equal("http://127.0.0.1:5000", projectA.OpenCodeOverrides.ServerUrl);
-        Assert.False(projectA.OpenCodeOverrides.ManageOpenCodeServer);
         Assert.Equal(PromptTransport.FileAttachment, projectA.OpenCodeOverrides.PromptTransport);
         Assert.Equal(12000, projectA.OpenCodeOverrides.MaxInlinePromptChars);
 
-        Assert.Equal("custom-opencode", projectB.OpenCodeOverrides.OpenCodeExecutable);
         Assert.Equal("http://127.0.0.1:5001", projectB.OpenCodeOverrides.ServerUrl);
-        Assert.False(projectB.OpenCodeOverrides.ManageOpenCodeServer);
     }
 
     [Fact]
@@ -184,7 +180,7 @@ public sealed class JsonAppConfigStoreTests
     }
 
     [Fact]
-    public async Task SaveAsync_PreservesUnchangedProjectRelativePaths()
+    public async Task SaveAsync_DropsLegacyQueuePathSettings()
     {
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "opencode-queue.json");
@@ -208,9 +204,11 @@ public sealed class JsonAppConfigStoreTests
         var reloaded = await store.LoadAsync(configPath, CancellationToken.None);
 
         Assert.Equal("project-b", reloaded!.ActiveProjectId!.Value.Value);
-        Assert.Contains("\"projectDir\": \"projects/a\"", saved, StringComparison.Ordinal);
-        Assert.Contains("\"projectDir\": \"projects/b\"", saved, StringComparison.Ordinal);
-        Assert.DoesNotContain(Path.Combine(root, "projects", "a"), saved, StringComparison.Ordinal);
+        Assert.Equal(Path.Combine(root, "projects", "a"), reloaded.Projects.Single(project => project.Id.Value == "project-a").ProjectDir);
+        Assert.Equal(Path.Combine(root, "projects", "b"), reloaded.Projects.Single(project => project.Id.Value == "project-b").ProjectDir);
+        Assert.DoesNotContain("promptsDir", saved, StringComparison.Ordinal);
+        Assert.DoesNotContain("qualityDir", saved, StringComparison.Ordinal);
+        Assert.DoesNotContain("stateDir", saved, StringComparison.Ordinal);
     }
 
     [Fact]

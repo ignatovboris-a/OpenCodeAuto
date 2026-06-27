@@ -14,9 +14,7 @@ public sealed class ProjectConsolePresenter(IConsoleReporter reporter)
         reporter.Info($"Проект: {project.Id}");
         reporter.Info($"Название: {project.DisplayName ?? project.Id.Value}");
         reporter.Info($"projectDir: {project.ProjectDir}");
-        reporter.Info($"promptsDir: {ProjectPaths.PromptsDir(project)}");
-        reporter.Info($"qualityDir: {ProjectPaths.QualityDir(project)}");
-        reporter.Info($"stateDir: {ProjectPaths.StateDir(project)}");
+        reporter.Info($"OpenCode: {project.OpenCodeOverrides.Provider}/{project.OpenCodeOverrides.Model}, effort={project.OpenCodeOverrides.ReasoningEffort}");
         reporter.Info($"Очередь задач: prompts = {taskCount}, quality = {qualityCount}");
     }
 
@@ -93,9 +91,8 @@ public sealed class ProjectConsolePresenter(IConsoleReporter reporter)
     public void PrintDiagnostics(ProjectProfile project)
     {
         reporter.PrintDirectoryStatus("projectDir", project.ProjectDir);
-        reporter.PrintDirectoryStatus("promptsDir", ProjectPaths.PromptsDir(project));
-        reporter.PrintDirectoryStatus("qualityDir", ProjectPaths.QualityDir(project));
-        reporter.PrintDirectoryStatus("stateDir", ProjectPaths.StateDir(project));
+        reporter.PrintDirectoryStatus("queueDir", ProjectPaths.QueueDir(project));
+        reporter.PrintDirectoryStatus("runsDir", ProjectPaths.RunsDir(project));
     }
 
     public void PrintManifest(ProjectProfile project, RunManifest manifest)

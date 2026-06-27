@@ -53,19 +53,39 @@ public sealed class ProjectCommandTests
     }
 
     [Fact]
+    public async Task ProjectSelect_CreatesQueueFoldersForExistingRegistryProject()
+    {
+        var root = CreateTempRoot();
+        var configPath = Path.Combine(root, "opencode-queue.json");
+        var projectDir = Path.Combine(root, "project");
+        Directory.CreateDirectory(projectDir);
+        var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir };
+        await new JsonProjectRegistry(new JsonAppConfigStore()).AddOrUpdateAsync(configPath, project, CancellationToken.None);
+        var dispatcher = CreateDispatcher(new TestReporter());
+
+        var exitCode = await dispatcher.DispatchAsync(CliCommand.Parse(["project", "select", "project-a", "--config", configPath]), CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.True(Directory.Exists(ProjectPaths.PromptsDir(project)));
+        Assert.True(Directory.Exists(ProjectPaths.QualityDir(project)));
+        Assert.True(Directory.Exists(ProjectPaths.RunsDir(project)));
+        Assert.NotEmpty(Directory.EnumerateFiles(ProjectPaths.QualityDir(project), "*.md"));
+    }
+
+    [Fact]
     public async Task List_PrintsRussianPromptDiscoveryForSelectedProject()
     {
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "opencode-queue.json");
         var projectDir = Path.Combine(root, "project");
-        Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
-        Directory.CreateDirectory(Path.Combine(projectDir, "quality"));
-        await File.WriteAllTextAsync(Path.Combine(projectDir, "prompts", "1.10-cache.md"), "cache");
-        await File.WriteAllTextAsync(Path.Combine(projectDir, "prompts", "1.2-api.md"), "api");
-        await File.WriteAllTextAsync(Path.Combine(projectDir, "quality", "review.md"), "review");
-        await File.WriteAllTextAsync(Path.Combine(projectDir, "quality", "01-self-check.md"), "check");
+        var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir };
+        CreateQueueDirs(project);
+        await File.WriteAllTextAsync(Path.Combine(ProjectPaths.PromptsDir(project), "1.10-cache.md"), "cache");
+        await File.WriteAllTextAsync(Path.Combine(ProjectPaths.PromptsDir(project), "1.2-api.md"), "api");
+        await File.WriteAllTextAsync(Path.Combine(ProjectPaths.QualityDir(project), "review.md"), "review");
+        await File.WriteAllTextAsync(Path.Combine(ProjectPaths.QualityDir(project), "01-self-check.md"), "check");
         var registry = new JsonProjectRegistry(new JsonAppConfigStore());
-        await registry.AddOrUpdateAsync(configPath, new ProjectProfile { Id = "project-a", ProjectDir = projectDir }, CancellationToken.None);
+        await registry.AddOrUpdateAsync(configPath, project, CancellationToken.None);
         await registry.SelectAsync(configPath, "project-a", CancellationToken.None);
         var reporter = new TestReporter();
         var dispatcher = CreateDispatcher(reporter);
@@ -86,9 +106,10 @@ public sealed class ProjectCommandTests
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "opencode-queue.json");
         var projectDir = Path.Combine(root, "project");
-        Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
+        var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir };
+        CreateQueueDirs(project);
         var registry = new JsonProjectRegistry(new JsonAppConfigStore());
-        await registry.AddOrUpdateAsync(configPath, new ProjectProfile { Id = "project-a", ProjectDir = projectDir }, CancellationToken.None);
+        await registry.AddOrUpdateAsync(configPath, project, CancellationToken.None);
         await registry.SelectAsync(configPath, "project-a", CancellationToken.None);
         var reporter = new TestReporter();
         var dispatcher = CreateDispatcher(reporter);
@@ -105,11 +126,10 @@ public sealed class ProjectCommandTests
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "opencode-queue.json");
         var projectDir = Path.Combine(root, "project");
-        Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
-        Directory.CreateDirectory(Path.Combine(projectDir, "quality"));
-        await File.WriteAllTextAsync(Path.Combine(projectDir, "prompts", "01.md"), "task");
-        var registry = new JsonProjectRegistry(new JsonAppConfigStore());
         var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir };
+        CreateQueueDirs(project);
+        await File.WriteAllTextAsync(Path.Combine(ProjectPaths.PromptsDir(project), "01.md"), "task");
+        var registry = new JsonProjectRegistry(new JsonAppConfigStore());
         await registry.AddOrUpdateAsync(configPath, project, CancellationToken.None);
         await registry.SelectAsync(configPath, "project-a", CancellationToken.None);
         await new JsonStateStore().SaveQueueStateAsync(project, new QueueState
@@ -135,11 +155,11 @@ public sealed class ProjectCommandTests
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "opencode-queue.json");
         var projectDir = Path.Combine(root, "project");
-        Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
-        Directory.CreateDirectory(Path.Combine(projectDir, "quality"));
-        await File.WriteAllTextAsync(Path.Combine(projectDir, "prompts", "01.md"), "task");
+        var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir };
+        CreateQueueDirs(project);
+        await File.WriteAllTextAsync(Path.Combine(ProjectPaths.PromptsDir(project), "01.md"), "task");
         var registry = new JsonProjectRegistry(new JsonAppConfigStore());
-        await registry.AddOrUpdateAsync(configPath, new ProjectProfile { Id = "project-a", ProjectDir = projectDir }, CancellationToken.None);
+        await registry.AddOrUpdateAsync(configPath, project, CancellationToken.None);
         await registry.SelectAsync(configPath, "project-a", CancellationToken.None);
         var dispatcher = CreateDispatcher(new TestReporter(), new FakeOpenCodeClient { FailPrompt = true });
 
@@ -154,10 +174,10 @@ public sealed class ProjectCommandTests
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "opencode-queue.json");
         var projectDir = Path.Combine(root, "project");
-        Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
-        Directory.CreateDirectory(Path.Combine(projectDir, "quality"));
+        var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir };
+        CreateQueueDirs(project);
         var registry = new JsonProjectRegistry(new JsonAppConfigStore());
-        await registry.AddOrUpdateAsync(configPath, new ProjectProfile { Id = "project-a", ProjectDir = projectDir }, CancellationToken.None);
+        await registry.AddOrUpdateAsync(configPath, project, CancellationToken.None);
         await registry.SelectAsync(configPath, "project-a", CancellationToken.None);
         var dispatcher = CreateDispatcher(new TestReporter(), new FakeOpenCodeClient { EnsureReadyException = new OpenCodeClientException("нет opencode") });
 
@@ -185,17 +205,17 @@ public sealed class ProjectCommandTests
     }
 
     [Fact]
-    public async Task Validate_AcceptsReviewsDirAliasWithoutFalseConflict()
+    public async Task Validate_AcceptsFixedQueueQualityDirectory()
     {
         var root = CreateTempRoot();
         var configPath = Path.Combine(root, "opencode-queue.json");
         var projectDir = Path.Combine(root, "project");
-        Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
-        Directory.CreateDirectory(Path.Combine(projectDir, "reviews"));
-        await File.WriteAllTextAsync(Path.Combine(projectDir, "prompts", "01.md"), "task");
-        await File.WriteAllTextAsync(Path.Combine(projectDir, "reviews", "01.md"), "review");
+        var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir };
+        CreateQueueDirs(project);
+        await File.WriteAllTextAsync(Path.Combine(ProjectPaths.PromptsDir(project), "01.md"), "task");
+        await File.WriteAllTextAsync(Path.Combine(ProjectPaths.QualityDir(project), "01.md"), "review");
         var registry = new JsonProjectRegistry(new JsonAppConfigStore());
-        await registry.AddOrUpdateAsync(configPath, new ProjectProfile { Id = "project-a", ProjectDir = projectDir, QualityDir = null, ReviewsDir = "reviews" }, CancellationToken.None);
+        await registry.AddOrUpdateAsync(configPath, project, CancellationToken.None);
         await registry.SelectAsync(configPath, "project-a", CancellationToken.None);
         var reporter = new TestReporter();
         var dispatcher = CreateDispatcher(reporter);
@@ -203,7 +223,7 @@ public sealed class ProjectCommandTests
         var exitCode = await dispatcher.DispatchAsync(CliCommand.Parse(["validate", "--config", configPath]), CancellationToken.None);
 
         Assert.Equal(0, exitCode);
-        Assert.DoesNotContain(reporter.Messages, message => message.Contains("qualityDir и reviewsDir", StringComparison.Ordinal));
+        Assert.DoesNotContain(reporter.Messages, message => message.Contains("queue quality", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -244,6 +264,13 @@ public sealed class ProjectCommandTests
     }
 
     private static string CreateTempRoot() => Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
+
+    private static void CreateQueueDirs(ProjectProfile project)
+    {
+        Directory.CreateDirectory(ProjectPaths.PromptsDir(project));
+        Directory.CreateDirectory(ProjectPaths.QualityDir(project));
+        Directory.CreateDirectory(ProjectPaths.RunsDir(project));
+    }
 
     private sealed class TestReporter : IConsoleReporter
     {

@@ -45,8 +45,6 @@ public static class AppConfigValidator
         }
 
         RequirePath(project.ProjectDir, $"Проект '{projectName}': projectDir обязателен.", errors);
-        RequirePath(project.PromptsDir, $"Проект '{projectName}': promptsDir обязателен.", errors);
-        RequirePath(project.StateDir, $"Проект '{projectName}': stateDir обязателен.", errors);
 
         if (project.OpenCodeOverrides.MaxInlinePromptChars <= 0)
         {

@@ -7,6 +7,7 @@ using OpenCodeQueue.Infrastructure.Configuration;
 using OpenCodeQueue.Infrastructure.Files;
 using OpenCodeQueue.Infrastructure.Prompts;
 using OpenCodeQueue.Infrastructure.State;
+using OpenCodeQueue.Infrastructure;
 
 namespace OpenCodeQueue.Tests;
 
@@ -29,7 +30,7 @@ public sealed class QueueUseCasesTests
         Assert.All(fixture.OpenCode.SessionIds, sessionId => Assert.Equal("session-1", sessionId));
         Assert.False(File.Exists(Path.Combine(fixture.ProjectDir, "prompts", "01-task.md")));
         Assert.True(File.Exists(Path.Combine(fixture.ProjectDir, "quality", "01-review.md")));
-        Assert.Single(Directory.EnumerateFiles(Path.Combine(fixture.ProjectDir, ".queue", "completed"), "*_01-task.md"));
+        Assert.Single(Directory.EnumerateFiles(ProjectPaths.CompletedDir(fixture.Project), "*_01-task.md"));
 
         var state = await fixture.StateStore.LoadQueueStateAsync(fixture.Project, CancellationToken.None);
         Assert.Null(state!.ActiveRunId);
@@ -348,7 +349,7 @@ public sealed class QueueUseCasesTests
         var result = await fixture.UseCases.RunQueueAsync(fixture.ConfigPath, null, once: true, CancellationToken.None);
 
         Assert.True(result.IsSuccess);
-        var manifestPath = Path.Combine(fixture.ProjectDir, ".queue", "runs", result.Manifest!.RunId, "manifest.json");
+        var manifestPath = ProjectPaths.RunManifestFile(fixture.Project, result.Manifest!.RunId);
         var manifestJson = await File.ReadAllTextAsync(manifestPath);
         Assert.DoesNotContain("super-secret", manifestJson, StringComparison.Ordinal);
     }
@@ -371,7 +372,7 @@ public sealed class QueueUseCasesTests
         var taskAttemptLogs = result.Manifest!.Steps[0].AttemptLogs;
         Assert.Equal(2, taskAttemptLogs.Count);
         Assert.All(taskAttemptLogs, log => Assert.True(File.Exists(log.MessageLogPath)));
-        Assert.Single(Directory.EnumerateFiles(Path.Combine(fixture.ProjectDir, ".queue", "completed"), "*_01-task.md"));
+        Assert.Single(Directory.EnumerateFiles(ProjectPaths.CompletedDir(fixture.Project), "*_01-task.md"));
     }
 
     [Fact]
@@ -557,12 +558,12 @@ public sealed class QueueUseCasesTests
     {
         var root = Path.Combine(Path.GetTempPath(), "OpenCodeQueueTests", Guid.NewGuid().ToString("N"));
         var projectDir = Path.Combine(root, "project");
-        Directory.CreateDirectory(Path.Combine(projectDir, "prompts"));
-        Directory.CreateDirectory(Path.Combine(projectDir, "quality"));
         var configPath = Path.Combine(root, "opencode-queue.json");
         var configStore = new JsonAppConfigStore();
         var registry = new JsonProjectRegistry(configStore);
         var project = new ProjectProfile { Id = "project-a", ProjectDir = projectDir, StopOnQualityFailure = stopOnQualityFailure, OpenCodeOverrides = settings ?? new OpenCodeSettings() };
+        Directory.CreateDirectory(ProjectPaths.PromptsDir(project));
+        Directory.CreateDirectory(ProjectPaths.QualityDir(project));
         await registry.AddOrUpdateAsync(configPath, project, CancellationToken.None);
         var stateStore = new JsonStateStore();
         var openCode = new FakeOpenCodeClient(failStepId, changeTaskBeforeArchive, ensureReadyException, abortSessionException, getSessionException, scriptedResults, statusResults);
@@ -576,7 +577,7 @@ public sealed class QueueUseCasesTests
             new FileSystemArchiver(),
             new FixedClock(),
             new OpenCodeStepResultClassifier());
-        return new Fixture(configPath, projectDir, project, stateStore, openCode, useCases);
+        return new Fixture(configPath, ProjectPaths.QueueDir(project), project, stateStore, openCode, useCases);
     }
 
     private sealed record Fixture(string ConfigPath, string ProjectDir, ProjectProfile Project, JsonStateStore StateStore, FakeOpenCodeClient OpenCode, QueueUseCases UseCases);
@@ -662,7 +663,7 @@ public sealed class QueueUseCasesTests
             Payloads.Add(payload);
             if (changeTaskBeforeArchive && payload.StepId == "task")
             {
-                await File.WriteAllTextAsync(Path.Combine(project.ProjectDir, "prompts", "01-task.md"), "changed", cancellationToken);
+                await File.WriteAllTextAsync(Path.Combine(ProjectPaths.PromptsDir(project), "01-task.md"), "changed", cancellationToken);
             }
         }
 
