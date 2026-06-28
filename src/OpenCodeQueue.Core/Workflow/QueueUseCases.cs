@@ -311,7 +311,7 @@ public sealed class QueueUseCases(
             manifest = await ResetFailedMessageIdPayloadValidationStepAsync(project, manifest, cancellationToken);
         }
 
-        if (manifest.Status == RunStatus.NeedsManualIntervention && IsRecoverableManualIntervention(manifest))
+        if (manifest.Status == RunStatus.NeedsManualIntervention && IsResumableManualIntervention(manifest))
         {
             manifest = manifest with { Status = RunStatus.Running, LastError = null, UpdatedAt = clock.Now, FinishedAt = null };
             await stateStore.SaveRunManifestAsync(project, manifest, cancellationToken);
@@ -506,7 +506,7 @@ public sealed class QueueUseCases(
             && text.Contains("BadRequest", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsRecoverableManualIntervention(RunManifest manifest)
+    private static bool IsResumableManualIntervention(RunManifest manifest)
     {
         if (string.IsNullOrWhiteSpace(manifest.SessionId)
             || manifest.CurrentStepIndex < 0
@@ -522,7 +522,9 @@ public sealed class QueueUseCases(
         }
 
         var error = manifest.LastError ?? string.Empty;
-        return error.Contains("Не удалось дождаться Idle status перед continuation", StringComparison.OrdinalIgnoreCase);
+        return error.Contains("Не удалось дождаться Idle status перед continuation", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("OpenCode запросил разрешение", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("OpenCode задал вопрос", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<RunManifest> SendLogicalStepWithRecoveryAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string sessionId, PromptPayload payload, bool isContinuation, CancellationToken cancellationToken, bool sendFirst = true)

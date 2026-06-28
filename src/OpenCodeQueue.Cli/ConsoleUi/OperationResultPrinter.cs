@@ -16,7 +16,7 @@ public sealed class OperationResultPrinter(IConsoleReporter reporter, ProjectCon
                 continue;
             }
 
-            if (result.IsSuccess)
+            if (result.IsSuccess || !IsWarningMessage(message))
             {
                 reporter.Info(message);
             }
@@ -40,5 +40,15 @@ public sealed class OperationResultPrinter(IConsoleReporter reporter, ProjectCon
             || message.Contains("заверш", StringComparison.OrdinalIgnoreCase)
             || message.Contains("пуст", StringComparison.OrdinalIgnoreCase)
             || message.Contains("нет активного", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsWarningMessage(string message)
+    {
+        return message.Contains("ошиб", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("failed", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("NeedsManualIntervention", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("ручн", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("не будет", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("не удалось", StringComparison.OrdinalIgnoreCase);
     }
 }

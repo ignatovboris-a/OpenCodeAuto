@@ -169,6 +169,29 @@ public sealed class ProjectCommandTests
     }
 
     [Fact]
+    public void OperationResultPrinter_DoesNotWarnForCompletedRunsInFailedBatch()
+    {
+        var reporter = new TestReporter();
+        var printer = new OperationResultPrinter(reporter, new ProjectConsolePresenter(reporter));
+
+        var exitCode = printer.Print(new QueueOperationResult
+        {
+            IsSuccess = false,
+            ExitCode = QueueExitCodes.WorkflowStepFailed,
+            Messages =
+            [
+                "Run run-1 завершён со статусом: Completed.",
+                "Run run-2 завершён со статусом: NeedsManualIntervention."
+            ]
+        });
+
+        Assert.Equal(QueueExitCodes.WorkflowStepFailed, exitCode);
+        Assert.Contains("Run run-1 завершён со статусом: Completed.", reporter.Messages);
+        Assert.DoesNotContain("Run run-1 завершён со статусом: Completed.", reporter.Warnings);
+        Assert.Contains("Run run-2 завершён со статусом: NeedsManualIntervention.", reporter.Warnings);
+    }
+
+    [Fact]
     public async Task Doctor_ReturnsOpenCodeUnavailableWhenRuntimeCheckFails()
     {
         var root = CreateTempRoot();
@@ -276,9 +299,15 @@ public sealed class ProjectCommandTests
     {
         public List<string> Messages { get; } = [];
 
+        public List<string> Warnings { get; } = [];
+
         public void Info(string message) => Messages.Add(message);
 
-        public void Warning(string message) => Messages.Add(message);
+        public void Warning(string message)
+        {
+            Messages.Add(message);
+            Warnings.Add(message);
+        }
 
         public void Error(string message) => Messages.Add(message);
 
