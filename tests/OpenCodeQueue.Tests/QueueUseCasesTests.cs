@@ -292,6 +292,47 @@ public sealed class QueueUseCasesTests
     }
 
     [Fact]
+    public async Task ResumeAsync_WhenManualStopWasIdleWait_ContinuesExistingPrompt()
+    {
+        var fixture = await CreateFixtureAsync();
+        var taskPath = Path.Combine(fixture.ProjectDir, "prompts", "01-task.md");
+        await File.WriteAllTextAsync(taskPath, "task body");
+        var discovered = await new FileSystemPromptRepository().DiscoverAsync(fixture.Project, CancellationToken.None);
+        var task = discovered.TaskPrompts[0];
+        var runId = "run-idle-wait-manual";
+        await SaveActiveManifestAsync(fixture, runId, new RunManifest
+        {
+            RunId = runId,
+            ProjectId = fixture.Project.Id,
+            ProjectDirSnapshot = fixture.Project.ProjectDir,
+            SessionId = "session-existing",
+            Status = RunStatus.NeedsManualIntervention,
+            CurrentStepIndex = 0,
+            LastError = "Не удалось дождаться Idle status перед continuation. Очередь остановлена, task prompt не архивирован.",
+            TaskDescriptor = task,
+            Steps = [new WorkflowStep
+            {
+                Id = WorkflowStepId.Task,
+                Kind = Core.Prompts.PromptKind.Task,
+                SourcePath = task.Path,
+                ContentHash = task.ContentHash,
+                Status = WorkflowStepStatus.Recovering,
+                SessionMessageId = "msg-existing"
+            }],
+            CreatedAt = FixedNow,
+            StartedAt = FixedNow,
+            UpdatedAt = FixedNow
+        });
+
+        var result = await fixture.UseCases.ResumeAsync(fixture.ConfigPath, null, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RunStatus.Completed, result.Manifest!.Status);
+        Assert.Empty(fixture.OpenCode.SentStepIds);
+        Assert.False(File.Exists(taskPath));
+    }
+
+    [Fact]
     public async Task Archive_WhenSourceHashChanged_LeavesCompletedPendingArchiveAndTaskInPlace()
     {
         var fixture = await CreateFixtureAsync(changeTaskBeforeArchive: true);

@@ -311,6 +311,13 @@ public sealed class QueueUseCases(
             manifest = await ResetFailedMessageIdPayloadValidationStepAsync(project, manifest, cancellationToken);
         }
 
+        if (manifest.Status == RunStatus.NeedsManualIntervention && IsRecoverableManualIntervention(manifest))
+        {
+            manifest = manifest with { Status = RunStatus.Running, LastError = null, UpdatedAt = clock.Now, FinishedAt = null };
+            await stateStore.SaveRunManifestAsync(project, manifest, cancellationToken);
+            await AppendEventAsync(project, QueueEventTypes.ActiveRunRecoveredAfterRestart, manifest.RunId, manifest.Steps[manifest.CurrentStepIndex].Id.Value, manifest.SessionId, manifest.TaskDescriptor?.FileName, "Возобновляю recoverable stop: повторно проверяю уже отправленный prompt в существующей session.", cancellationToken);
+        }
+
         if (manifest.Status is RunStatus.Failed or RunStatus.Aborted or RunStatus.NeedsManualIntervention or RunStatus.Completed)
         {
             return manifest;
@@ -499,6 +506,25 @@ public sealed class QueueUseCases(
             && text.Contains("BadRequest", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsRecoverableManualIntervention(RunManifest manifest)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.SessionId)
+            || manifest.CurrentStepIndex < 0
+            || manifest.CurrentStepIndex >= manifest.Steps.Count)
+        {
+            return false;
+        }
+
+        var step = manifest.Steps[manifest.CurrentStepIndex];
+        if (step.Status is not (WorkflowStepStatus.Running or WorkflowStepStatus.Recovering))
+        {
+            return false;
+        }
+
+        var error = manifest.LastError ?? string.Empty;
+        return error.Contains("Не удалось дождаться Idle status перед continuation", StringComparison.OrdinalIgnoreCase);
+    }
+
     private async Task<RunManifest> SendLogicalStepWithRecoveryAsync(ProjectProfile project, RunManifest manifest, int stepIndex, string sessionId, PromptPayload payload, bool isContinuation, CancellationToken cancellationToken, bool sendFirst = true)
     {
         var resilience = manifest.OpenCodeSettingsSnapshot.Resilience;
@@ -617,7 +643,8 @@ public sealed class QueueUseCases(
     {
         var deadline = clock.Now.AddMinutes(Math.Max(1, resilience.StepTimeoutMinutes));
         var step = manifest.Steps[stepIndex];
-        var maxChecks = Math.Max(1, resilience.MaxTransportRetriesPerAttempt + resilience.MaxContinuationAttemptsPerStep + 1);
+        var delaySeconds = Math.Max(1, resilience.RetryDelaySeconds);
+        var maxChecks = Math.Max(1, (int)Math.Ceiling(Math.Max(1, (double)resilience.StepTimeoutMinutes) * 60 / delaySeconds) + 1);
         for (var check = 0; check < maxChecks && clock.Now <= deadline; check++)
         {
             OpenCodeSessionStatus status;
